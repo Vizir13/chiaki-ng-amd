@@ -5887,7 +5887,10 @@ bool QmlMainWindow::throttleFramePresentation(double interval_s)
     // There a late present goes out right away and the following ones catch
     // up on the same slots; they restart only when more than an interval
     // behind or when the interval really changes (another multiplier).
-    const bool frame_gen_pacing = fg_active_multiplier > 1;
+    // Only from 3x on: at 2x there is time to spare, and catching up put
+    // presents close together whenever a stream frame came in late, which
+    // showed as uneven motion in camera pans; there the regular slots stay.
+    const bool frame_gen_pacing = fg_active_multiplier > 2;
     if (frame_gen_pacing
             ? qAbs(last_throttle_interval_s - interval_s) > interval_s * 0.25
             : qAbs(last_throttle_interval_s - interval_s) > 1e-6)
