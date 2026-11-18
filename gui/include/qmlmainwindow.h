@@ -308,6 +308,13 @@ private:
     bool bypass_frame_queue = true;
     QMutex direct_frame_mutex;
     AVFrame *direct_pending_frame = nullptr;
+    // When direct_pending_frame was handed over (guarded by direct_frame_mutex),
+    // and a lock-free flag for it so a render waiting for a frame slot can
+    // stop as soon as a new picture is there.
+    int64_t direct_pending_arrival_us = 0;
+    QAtomicInteger<int> direct_pending_available = 0;
+    // Arrival time of the picture mapped in direct_frame (render thread).
+    int64_t direct_frame_arrival_us = 0;
     struct pl_frame direct_frame = {};
     QAtomicInteger<int> direct_frame_reset = 0;
     uint64_t ts_start = 0;
@@ -418,7 +425,7 @@ private:
     std::vector<FgQueuedFrame> fg_pending_frames;
     FgPacer fg_pacer;
     // Pictures processed by frame generation (FrameGen keeps the textures of
-    // the last three alive).
+    // the last three alive: processing picture B overwrites those of B - 3).
     uint64_t fg_batch_counter = 0;
     // Presentation time of the frame the current render shows (0 = untimed).
     int64_t fg_present_target_us = 0;

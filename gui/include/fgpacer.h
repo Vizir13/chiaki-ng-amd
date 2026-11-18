@@ -30,9 +30,11 @@ class FgPacer
 public:
     struct Config
     {
+        // Every ms here is added to the input latency of every frame: a large
+        // buffer only hides rare Wi-Fi spikes, which then cost one hitch.
         int64_t min_buffer_us = 2000;
-        int64_t start_buffer_us = 5000;
-        int64_t max_buffer_us = 20000;
+        int64_t start_buffer_us = 4000;
+        int64_t max_buffer_us = 12000;
         // Buffer growth after a late picture and shrink after a stable stretch.
         int64_t grow_us = 2000;
         int64_t shrink_us = 500;
@@ -101,11 +103,15 @@ public:
             // pictures widen the buffer, which costs latency on every frame.
             // Half the buffer is rebuilt at once so the next picture is not
             // late again; the steering below restores the rest.
+            // Only a picture a little late (jitter just above the buffer)
+            // widens it: a large Wi-Fi spike would not be covered by any
+            // affordable buffer, so growing for it only adds latency.
+            const int64_t late_by_us = now_us + extra_lead_us - next_start_us;
             start = now_us + extra_lead_us + buffer_us / 2;
             late_batches++;
             stable_batches = 0;
             excess_avg_us = 0.0;
-            if (batches - last_late_batch <= cfg.late_window_batches)
+            if (late_by_us <= cfg.grow_us && batches - last_late_batch <= cfg.late_window_batches)
                 buffer_us = (std::min)(buffer_us + cfg.grow_us, cfg.max_buffer_us);
             last_late_batch = batches;
         } else {
@@ -117,7 +123,10 @@ public:
             const double excess = static_cast<double>((next_start_us - now_us) - lead_wanted);
             excess_avg_us += (excess - excess_avg_us) / 8.0;
             const double max_step = static_cast<double>(period) / 50.0;
-            start = next_start_us - static_cast<int64_t>(std::clamp(excess_avg_us, -max_step, max_step));
+            // Pulling in never goes past this picture's own margin: the average
+            // lags behind, and overshooting made the next picture late.
+            const double step = excess_avg_us > 0.0 ? (std::min)(excess_avg_us, (std::max)(excess, 0.0)) : excess_avg_us;
+            start = next_start_us - static_cast<int64_t>(std::clamp(step, -max_step, max_step));
             if (++stable_batches >= cfg.stable_batches_to_shrink) {
                 stable_batches = 0;
                 buffer_us = (std::max)(buffer_us - cfg.shrink_us, cfg.min_buffer_us);

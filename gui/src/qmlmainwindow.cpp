@@ -3225,6 +3225,10 @@ void QmlMainWindow::presentFrame(ChiakiFfmpegFrame frame, int32_t frames_lost, q
                 dropped_frames_current.fetchAndAddRelaxed(1);
             }
             direct_pending_frame = frame.frame;
+            // Taken here, not when the render thread gets to it: the render
+            // may be waiting for a frame slot, which is not network jitter.
+            direct_pending_arrival_us = static_cast<int64_t>(chiaki_time_now_monotonic_us());
+            direct_pending_available.storeRelease(1);
         }
         if (!startup_warmup_frame_active)
             startup_first_real_frame_queued_pending_visibility.storeRelease(1);
@@ -5411,6 +5415,7 @@ renderer_backend_ready:
             {
                 QMutexLocker locker(&direct_frame_mutex);
                 av_frame_free(&direct_pending_frame);
+                direct_pending_available.storeRelease(0);
                 direct_frame_reset.storeRelease(1);
             }
             {
@@ -7113,6 +7118,22 @@ void QmlMainWindow::render()
     fg_present_target_us = 0;
     fg_presenting_valid = false;
     if (bypass_frame_queue && !fg_pending_frames.empty()) {
+        // Wait for the next frame's slot before rendering it rather than after:
+        // a picture arriving meanwhile is taken in at once instead of sitting
+        // behind a slot (which delayed it by up to a frame interval and made it
+        // look late to the pacer). Only the render and submit time is left to
+        // wait in close_started_frame.
+        const int64_t slot_us = fg_pending_frames.front().target_us;
+        if (slot_us > 0 && direct_pending_available.loadAcquire() == 0) {
+            int64_t ahead_us = static_cast<int64_t>(render_submit_estimate_us.loadAcquire()) +
+                static_cast<int64_t>(g_submit_swap_est_us.load(std::memory_order_acquire));
+            ahead_us = ahead_us < 0 ? 0 : (ahead_us > 8000 ? 8000 : ahead_us);
+            fgWaitUntilUs(slot_us - ahead_us - 1500, [this]() {
+                return direct_pending_available.loadAcquire() != 0 ||
+                    ui_priority_update_pending.loadAcquire() != 0 ||
+                    stream_session_active.loadAcquire() == 0;
+            });
+        }
         bool incoming_waiting = false;
         {
             QMutexLocker locker(&direct_frame_mutex);
@@ -7144,6 +7165,9 @@ void QmlMainWindow::render()
         {
             QMutexLocker locker(&direct_frame_mutex);
             std::swap(incoming, direct_pending_frame);
+            direct_pending_available.storeRelease(0);
+            if (incoming)
+                direct_frame_arrival_us = direct_pending_arrival_us;
             reset_direct_frame = direct_frame_reset.fetchAndStoreRelaxed(0) != 0;
         }
         if (reset_direct_frame && frame_gen)
@@ -8125,7 +8149,7 @@ void QmlMainWindow::render()
             const uint64_t fg_batch = multiplier >= 2 ? fg_batch_counter++ : fg_batch_counter;
             if (multiplier >= 2)
                 fg_pending_frames.erase(std::remove_if(fg_pending_frames.begin(), fg_pending_frames.end(),
-                                                       [fg_batch](const FgQueuedFrame &f) { return f.batch + 2 <= fg_batch; }),
+                                                       [fg_batch](const FgQueuedFrame &f) { return f.batch + 3 <= fg_batch; }),
                                         fg_pending_frames.end());
             if (multiplier >= 2 &&
                 frame_gen->process(&direct_render_frame, fg_out_w, fg_out_h, multiplier,
@@ -8143,8 +8167,13 @@ void QmlMainWindow::render()
                 std::vector<int64_t> fg_targets(fg_outputs.size(), 0);
                 if (period_us > 0) {
                     const int count = static_cast<int>(fg_outputs.size());
-                    fg_pacer.schedule(static_cast<int64_t>(chiaki_time_now_monotonic_us()), period_us,
-                                      count, gpu_lead_us, fg_targets.data());
+                    // Scheduled from the picture's arrival: time the render
+                    // thread spent on other frames is not network jitter.
+                    const int64_t now_us = static_cast<int64_t>(chiaki_time_now_monotonic_us());
+                    const int64_t arrival_us = direct_frame_arrival_us > 0 && direct_frame_arrival_us <= now_us &&
+                            now_us - direct_frame_arrival_us < period_us
+                        ? direct_frame_arrival_us : now_us;
+                    fg_pacer.schedule(arrival_us, period_us, count, gpu_lead_us, fg_targets.data());
                     // After a resync the clock may restart before frames still
                     // queued: keep the presentation times increasing.
                     if (!fg_pending_frames.empty()) {
