@@ -1556,8 +1556,12 @@ bool FrameGen::processFrames(const struct pl_frame *src, int out_w, int out_h, i
     const bool cleanup = d.cleanup_mode > 0 && !d.fixup_failed;
     const bool motion_for_backend = (d.backend == FrameGen::Backend::Dlss && d.dlss_flow_motion) ||
                                     d.backend == FrameGen::Backend::Fsr;
+    // Flow runs its own motion search for its frames and its synthesis already
+    // keeps static content in place; a second full search (anchored at the
+    // current frame) only for the clean-up pass would double the GPU work, so
+    // its clean-up works without motion vectors.
     const bool want_motion = motion_for_backend ||
-                             (cleanup && d.backend != FrameGen::Backend::Dlss && d.backend != FrameGen::Backend::Fsr);
+                             (cleanup && d.backend == FrameGen::Backend::Vfg);
     if (want_motion && !d.motion_flow_failed) {
         if (!d.motion_flow) {
             d.motion_flow = std::make_unique<FlowInterpolator>(d.log, d.gpu);

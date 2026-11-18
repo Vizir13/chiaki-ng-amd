@@ -1,6 +1,8 @@
 #ifndef CHIAKI_GUI_REPEATCADENCE_H
 #define CHIAKI_GUI_REPEATCADENCE_H
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -10,6 +12,12 @@
 // shows up as a small packet between normal ones. Frame generation fed with
 // those repeats interpolates between identical pictures and then jumps, which
 // looks wobbly; dropping them restores an even 30 fps source.
+//
+// "Small" is judged against the typical size of a new picture: the median of
+// the larger half of the last 16 frames. A single huge key frame (sent after
+// packet loss) therefore does not make every following frame look small, and
+// a run of quiet pictures (menus, static scenes) lowers the reference with
+// them instead of being taken for repeats.
 class RepeatCadenceDetector
 {
 public:
@@ -22,7 +30,12 @@ public:
         if (!packet_size)
             return false;
         last_size = packet_size;
-        const bool small = last_new > 0 && static_cast<double>(packet_size) < static_cast<double>(last_new) * kSmallRatio;
+        const size_t reference = typicalNewSize();
+        const bool small = reference > 0 && static_cast<double>(packet_size) < static_cast<double>(reference) * kSmallRatio;
+        sizes[cursor] = packet_size;
+        cursor = (cursor + 1) % sizes.size();
+        if (filled < sizes.size())
+            filled++;
         if (!small)
             last_new = packet_size;
 
@@ -35,6 +48,7 @@ public:
             if (seen >= 12 && (last12 == 0xaaau || last12 == 0x555u)) {
                 locked = true;
                 misses = 0;
+                small_in_new_slot = 0;
                 expect_repeat = !small;
                 return small;
             }
@@ -53,7 +67,16 @@ public:
             return false;
         }
         // Slot of a new picture: always kept. A small frame here means the game
-        // dropped below 30 fps for a moment; keep the phase.
+        // dropped below 30 fps for a moment (or the picture barely changed);
+        // several in a row means the stream no longer alternates.
+        if (small) {
+            if (++small_in_new_slot >= 3) {
+                unlock();
+                return false;
+            }
+        } else {
+            small_in_new_slot = 0;
+        }
         expect_repeat = true;
         return false;
     }
@@ -67,19 +90,37 @@ public:
     void reset() { *this = RepeatCadenceDetector(); }
 
 private:
+    // Median of the larger half of the recent frame sizes.
+    size_t typicalNewSize() const
+    {
+        if (filled < 4)
+            return last_new;
+        std::array<size_t, 16> tmp = {};
+        std::copy(sizes.begin(), sizes.begin() + static_cast<std::ptrdiff_t>(filled), tmp.begin());
+        std::sort(tmp.begin(), tmp.begin() + static_cast<std::ptrdiff_t>(filled));
+        const size_t half = filled / 2;
+        return tmp[half + (filled - half) / 2];
+    }
+
     void unlock()
     {
         locked = false;
         history = 0;
         seen = 0;
+        misses = 0;
+        small_in_new_slot = 0;
     }
 
     static constexpr double kSmallRatio = 0.3;
+    std::array<size_t, 16> sizes = {};
+    size_t cursor = 0;
+    size_t filled = 0;
     size_t last_new = 0;
     size_t last_size = 0;
     uint32_t history = 0;
     int seen = 0;
     int misses = 0;
+    int small_in_new_slot = 0;
     bool locked = false;
     bool expect_repeat = false;
 };

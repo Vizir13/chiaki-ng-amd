@@ -3,6 +3,7 @@
 #include "streamsession.h"
 #include "settings.h"
 #include "repeatcadence.h"
+#include "fgpacer.h"
 
 #include <QMutex>
 #include <QAtomicInteger>
@@ -357,7 +358,13 @@ private:
     // Stream frames per game picture (2 = 30 fps game in a 60 fps stream,
     // repeats dropped before frame generation); set by presentFrame.
     RepeatCadenceDetector repeat_detector;
+    // Set when a stream starts; presentFrame then starts the detector afresh.
+    QAtomicInteger<int> repeat_detector_reset_pending = 0;
     QAtomicInteger<int> fg_source_cadence = 1;
+    // Frame generation GPU time (us) and presentation buffer (us), written by
+    // the render thread for the stats overlay (which must not touch frame_gen).
+    QAtomicInteger<int> fg_status_gpu_us = 0;
+    QAtomicInteger<int> fg_status_buffer_us = 0;
     // Marker file present while frame generation starts; found at startup it
     // means the last start crashed, and frame generation is switched off.
     bool fg_crash_guard_armed = false;
@@ -397,8 +404,24 @@ private:
     RtxVsr *rtx_vsr = nullptr;
     bool rtx_vsr_active = false;
     FrameGen *frame_gen = nullptr;
-    // Frames still to be presented for the last stream frame: generated ones first, the real one last.
-    std::vector<struct pl_frame> fg_pending_frames;
+    // Frames from frame generation still to be presented, oldest first, each
+    // with its presentation time from fg_pacer (generated frames of a picture
+    // first, the real picture last). Frames of up to two pictures can be
+    // queued: a new picture is processed as soon as it arrives while the
+    // previous one is still being shown.
+    struct FgQueuedFrame
+    {
+        struct pl_frame frame;
+        int64_t target_us;
+        uint64_t batch;
+    };
+    std::vector<FgQueuedFrame> fg_pending_frames;
+    FgPacer fg_pacer;
+    // Pictures processed by frame generation (FrameGen keeps the textures of
+    // the last three alive).
+    uint64_t fg_batch_counter = 0;
+    // Presentation time of the frame the current render shows (0 = untimed).
+    int64_t fg_present_target_us = 0;
     int fg_active_multiplier = 1;
     int fg_active_cadence = 1;
     int fg_last_backend = 0;

@@ -60,6 +60,9 @@ set(SOURCE_FILES
 	src/rtxvsr.cpp
 	include/framegen.h
 	src/framegen.cpp
+	include/fgpacer.h
+	include/fgwait.h
+	src/fgwait.cpp
 	include/flowfg.h
 	include/fgfixup.h
 	include/vfg.h
