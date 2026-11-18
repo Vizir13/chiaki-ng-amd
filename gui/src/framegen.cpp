@@ -1679,23 +1679,16 @@ bool FrameGen::process(const struct pl_frame *src, int out_w, int out_h, int mul
     pl_tex prev = (d.reset_pending || !d.have_history || !d.last_real) ? nullptr : d.last_real->tex;
     const bool chain = d.vfg_chain && !d.chain_failed && d.backend == FrameGen::Backend::Vfg && multiplier >= 4;
     // The chain runs up to three motion searches per stream frame (clean-up,
-    // and one per DLSS pair): always at 1/4 resolution, the 1/2 resolution
-    // "Quality" analysis costs several times the GPU time there.
-    const bool flow_hq = d.flow_high_quality;
-    if (chain)
-        d.flow_high_quality = false;
-    const bool processed = processFrames(src, out_w, out_h, chain ? 2 : multiplier, frame_interval_ms, outputs);
-    if (!processed) {
-        d.flow_high_quality = flow_hq;
+    // and one per DLSS pair) at the Flow Quality setting: 1/2 resolution
+    // gives DLSS finer motion around small detail for a few ms more.
+    if (!processFrames(src, out_w, out_h, chain ? 2 : multiplier, frame_interval_ms, outputs))
         return false;
-    }
     d.vfg_chain_active = false;
     if (!prev)
         d.chain_last = nullptr;
     fixupFrames(prev, outputs);
     if (chain && d.backend == FrameGen::Backend::Vfg)
         d.vfg_chain_active = runVfgChain(d, outputs, frame_interval_ms * 0.5f);
-    d.flow_high_quality = flow_hq;
     return true;
 }
 
