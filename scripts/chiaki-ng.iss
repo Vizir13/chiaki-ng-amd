@@ -3,7 +3,7 @@
 
 #define MyAppName "chiaki-ng"
 #define MyAppPublisher "Street Pea"
-#define MyAppURL "https://streetpea.github.io/chiaki-ng/"
+#define MyAppURL "https://chiaki-ng.github.io/chiaki-ng/"
 #define MyAppExeName "chiaki.exe"
 #define MyAppPath "..\chiaki-ng-Win"
 #define MyAppVersion() \
@@ -86,6 +86,8 @@ Source: "..\scripts\install-nvidia-vfx.ps1"; DestDir: "{app}"; Flags: ignorevers
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+; Switches the renderer to OpenGL for systems where Vulkan shows a blank window or crashes
+Name: "{group}\{#MyAppName} (OpenGL)"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--opengl"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]

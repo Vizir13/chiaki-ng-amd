@@ -6,13 +6,16 @@ on:
   workflow_call:
   push:
     branches:
-      - claude/happy-gauss-7i9rwm
+      - amd
 
 # A newer push to the same branch supersedes a running build. Literal name: in a
 # workflow_call run github.workflow is the caller's, so both builds would share a group.
 concurrency:
   group: build-windows-x86-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   build-win_x64:
@@ -26,19 +29,20 @@ jobs:
       # vcpkg 2026.10.16; the older baseline points at MSYS2 packages that were removed from the mirrors
       vcpkg_baseline: 9eec002df1cd109f8f104cd966a763daf9751489
       dep_folder: deps
-      libplacebo_tag: v7.360.1
+      libplacebo_tag: v7.387.0
       # The pinned vcpkg ports (e.g. json-c) still declare cmake_minimum_required < 3.5,
       # which the runner's CMake 4.x rejects unless a policy minimum is set.
       CMAKE_POLICY_VERSION_MINIMUM: '3.5'
       VCPKG_KEEP_ENV_VARS: CMAKE_POLICY_VERSION_MINIMUM
-      sdl2_compat_tag: 2.32.64
+      sdl2_compat_tag: 2.32.74
+
 
     defaults:
       run:
         shell: powershell
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: 'recursive'
 
@@ -59,7 +63,7 @@ jobs:
         run: choco install ninja
 
       - name: Set up Clang
-        uses: egor-tensin/setup-clang@v1
+        uses: egor-tensin/setup-clang@v2
         with:
           version: 18
 
@@ -69,7 +73,7 @@ jobs:
       - name: Setup Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: "6.9.*"
+          version: "6.12.*"
           host: 'windows'
           target: 'desktop'
           modules: 'qtwebengine qtpositioning qtwebchannel qtwebsockets qtserialport'
@@ -86,9 +90,9 @@ jobs:
       - name: Setup ffmpeg
         run: |
           $ProgressPreference = 'SilentlyContinue'
-          Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/streetpea/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip" -OutFile ".\ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip"
-          Expand-Archive -LiteralPath "ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip" -DestinationPath "."
-          Rename-Item "ffmpeg-n7.1-latest-win64-gpl-shared-7.1" "${{ env.dep_folder }}"
+          Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/streetpea/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-gpl-shared-9.0.zip" -OutFile ".\ffmpeg-n9.0-latest-win64-gpl-shared-9.0.zip"
+          Expand-Archive -LiteralPath "ffmpeg-n9.0-latest-win64-gpl-shared-9.0.zip" -DestinationPath "."
+          Rename-Item "ffmpeg-n9.0-latest-win64-gpl-shared-9.0" "${{ env.dep_folder }}"
 
       - name: Setup sdl2-compat
         run: |
@@ -287,7 +291,7 @@ jobs:
           echo "RELEASE_PACKAGE_PATH=$release_filepath" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Upload chiaki-ng Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: chiaki-ng-win_x64-VC-Release
           path: ${{ env.RELEASE_PACKAGE_PATH }}
@@ -295,13 +299,13 @@ jobs:
           retention-days: 7
 
       - name: Compile .ISS to .EXE Installer
-        uses: Minionguyjpro/Inno-Setup-Action@v1.2.7
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.9
         with:
           path: "scripts/chiaki-ng.iss"
           options: /O+
 
       - name: Upload chiaki-ng Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: chiaki-ng-win_x64-VC-installer.zip
           path: chiaki-ng-windows-installer.exe
