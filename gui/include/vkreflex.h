@@ -30,9 +30,18 @@ const VkPhysicalDeviceFeatures2 *deviceFeatures();
 void onDeviceCreated(pl_vulkan vulkan);
 void onDeviceDestroyed();
 
+// Low latency mode of the swapchains created from now on (setting).
+void setLowLatencyEnabled(bool enabled);
+
 // Reflex markers of the frame the next present belongs to.
 void markFrameStart();
 void markRenderSubmitted();
+
+// Holds the next vkQueuePresentKHR until target_us (monotonic), after the
+// frame's rendering was already submitted to the GPU. Returns false when the
+// present is not wrapped (then the caller has to wait before submitting).
+// `done` is called with the target and the time the present went out.
+bool delayNextPresent(qint64 target_us, void (*done)(qint64 target_us, qint64 present_us, qint64 waited_us));
 
 // Display period the stats are measured in (refreshes per frame).
 void setRefreshRate(double hz);

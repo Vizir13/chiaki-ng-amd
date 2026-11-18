@@ -1018,6 +1018,14 @@ static void waitUntilMonotonicUs(qint64 target_us)
     }
 }
 
+static void recordScheduledPresent(qint64 target_us, qint64 submit_us);
+// A scheduled present held in vkQueuePresentKHR (vkreflex) went out.
+static void scheduledPresentDone(qint64 target_us, qint64 present_us, qint64 waited_us)
+{
+    fg_time_pace.add(waited_us);
+    recordScheduledPresent(target_us, present_us);
+}
+
 // Records how a scheduled present met its target.
 static void recordScheduledPresent(qint64 target_us, qint64 submit_us)
 {
@@ -6181,7 +6189,11 @@ void QmlMainWindow::processDeferredSwapTask(qint64 submit_begin_us,
         logLatencyStats("submit_queue_delay", submit_begin_local_us - submit_begin_us);
 
     const qint64 scheduled_target_us = deferred_present_target_us.fetchAndStoreAcquire(0);
-    if (scheduled_target_us > 0) {
+    // The frame's rendering goes to the GPU now and only the present waits
+    // for the target (see the render thread's scheduled present).
+    if (scheduled_target_us > 0 && VkReflex::delayNextPresent(scheduled_target_us, scheduledPresentDone)) {
+        present_pacing_reset_pending.storeRelease(1);
+    } else if (scheduled_target_us > 0) {
         const qint64 pace_begin_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
         waitUntilMonotonicUs(scheduled_target_us);
         const qint64 pace_end_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
@@ -6476,6 +6488,7 @@ void QmlMainWindow::createSwapchain()
     if (swapchain_depth_override >= 1 && swapchain_depth_override <= 4)
         swapchain_depth = swapchain_depth_override;
     swapchain_frame_gen_depth = settings->GetFrameGenBackend() > 0;
+    VkReflex::setLowLatencyEnabled(settings->GetNvidiaReflex());
     struct pl_vulkan_swapchain_params swapchain_params = {
         .surface = surface,
         // Prefer MAILBOX for vsync (lower) latency when supported).
@@ -7683,7 +7696,15 @@ void QmlMainWindow::render()
             vulkan_deferred_swap_enabled &&
             deferred_swap_thread &&
             deferred_present_in_flight.loadAcquire() == 0;
-        if (!use_deferred_swap && present && fg_present_target_us > 0) {
+        if (!use_deferred_swap && present && fg_present_target_us > 0 &&
+            VkReflex::delayNextPresent(fg_present_target_us, scheduledPresentDone)) {
+            // Submit the rendering now and hold only the present until the
+            // target. Waiting before the submit put the final render on a GPU
+            // busy with the next frame's VFG (CUDA): it reached the screen
+            // 0-17 ms after the present, so frames stayed 2 or 4 refreshes
+            // instead of 3 at 60 fps / 180 Hz.
+            present_pacing_reset_pending.storeRelease(1);
+        } else if (!use_deferred_swap && present && fg_present_target_us > 0) {
             waitUntilMonotonicUs(fg_present_target_us);
             recordScheduledPresent(fg_present_target_us, static_cast<qint64>(chiaki_time_now_monotonic_us()));
             present_pacing_reset_pending.storeRelease(1);

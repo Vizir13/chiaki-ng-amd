@@ -214,6 +214,25 @@ DialogView {
 
             Label {
                 Layout.alignment: Qt.AlignRight
+                text: qsTr("NVIDIA Reflex:")
+            }
+
+            C.ComboBox {
+                Layout.preferredWidth: 600
+                model: [qsTr("Off"), qsTr("On (low latency)")]
+                currentIndex: Chiaki.settings.nvidiaReflex ? 1 : 0
+                onActivated: index => Chiaki.settings.nvidiaReflex = index === 1
+                ToolTip.visible: hovered
+                ToolTip.text: qsTr("NVIDIA Reflex low latency mode for the presentation (Vulkan, NVIDIA GPUs): frames do not queue up for the GPU. Applies from the next stream.")
+            }
+
+            Label {
+                Layout.alignment: Qt.AlignRight
+                text: qsTr("(On)")
+            }
+
+            Label {
+                Layout.alignment: Qt.AlignRight
                 visible: Chiaki.settings.frameGenVfgSupported
                 text: qsTr("NVIDIA Runtime:")
             }

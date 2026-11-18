@@ -5,6 +5,7 @@
 #include <QLoggingCategory>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -48,8 +49,13 @@ VkDevice device = VK_NULL_HANDLE;
 std::atomic<bool> low_latency{false};
 std::atomic<bool> present_ids{false};
 std::atomic<bool> present_wait{false};
+std::atomic<bool> low_latency_wanted{true};
+// The current swapchain was created with the low latency mode.
+std::atomic<bool> swapchain_latency{false};
 std::atomic<uint64_t> last_present_id{0};
 std::atomic<uint64_t> marked_frame_id{0};
+std::atomic<qint64> present_target_us{0};
+std::atomic<void (*)(qint64, qint64, qint64)> present_done{nullptr};
 
 // Current swapchain; markers and waits only use it while it is alive.
 std::mutex swapchain_mutex;
@@ -91,7 +97,7 @@ void markerFor(VkSwapchainKHR sc, uint64_t id, VkLatencyMarkerNV marker)
 
 void markCurrent(VkLatencyMarkerNV marker, uint64_t id)
 {
-    if (!low_latency.load(std::memory_order_relaxed))
+    if (!low_latency.load(std::memory_order_relaxed) || !swapchain_latency.load(std::memory_order_relaxed))
         return;
     std::lock_guard<std::mutex> lock(swapchain_mutex);
     markerFor(swapchain, id, marker);
@@ -163,7 +169,7 @@ VKAPI_ATTR VkResult VKAPI_CALL wrapCreateSwapchain(VkDevice dev, const VkSwapcha
 {
     VkResult res;
     bool latency_mode = false;
-    if (low_latency.load()) {
+    if (low_latency.load() && low_latency_wanted.load()) {
         VkSwapchainCreateInfoKHR ci = *info;
         VkSwapchainLatencyCreateInfoNV lci = {};
         lci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_LATENCY_CREATE_INFO_NV;
@@ -179,6 +185,8 @@ VKAPI_ATTR VkResult VKAPI_CALL wrapCreateSwapchain(VkDevice dev, const VkSwapcha
     }
     if (res != VK_SUCCESS)
         return res;
+    if (low_latency.load() && !latency_mode)
+        qCInfo(chiakiGui) << "[reflex] Low latency mode off for the swapchain";
     if (latency_mode && set_sleep_mode) {
         VkLatencySleepModeInfoNV mode = {};
         mode.sType = VK_STRUCTURE_TYPE_LATENCY_SLEEP_MODE_INFO_NV;
@@ -192,6 +200,7 @@ VKAPI_ATTR VkResult VKAPI_CALL wrapCreateSwapchain(VkDevice dev, const VkSwapcha
     {
         std::lock_guard<std::mutex> lock(swapchain_mutex);
         swapchain = *out;
+        swapchain_latency.store(latency_mode);
     }
     {
         std::lock_guard<std::mutex> lock(stats_mutex);
@@ -219,6 +228,24 @@ VKAPI_ATTR void VKAPI_CALL wrapDestroySwapchain(VkDevice dev, VkSwapchainKHR sc,
 
 VKAPI_ATTR VkResult VKAPI_CALL wrapQueuePresent(VkQueue q, const VkPresentInfoKHR *info)
 {
+    // Scheduled present: the rendering is already on the GPU; only the flip
+    // waits for its time (bounded, in case the target is stale).
+    const qint64 target = present_target_us.exchange(0);
+    if (target > 0) {
+        const qint64 begin = nowUs();
+        const qint64 until = qMin(target, begin + 50000);
+        for (;;) {
+            const qint64 remaining = until - nowUs();
+            if (remaining <= 0)
+                break;
+            if (remaining > 1500)
+                std::this_thread::sleep_for(std::chrono::microseconds(remaining - 1000));
+            else
+                std::this_thread::yield();
+        }
+        if (auto cb = present_done.load())
+            cb(target, nowUs(), nowUs() - begin);
+    }
     if (!present_ids.load() || info->swapchainCount == 0)
         return real_queue_present(q, info);
     const uint64_t id = last_present_id.fetch_add(1) + 1;
@@ -231,7 +258,7 @@ VKAPI_ATTR VkResult VKAPI_CALL wrapQueuePresent(VkQueue q, const VkPresentInfoKH
     VkPresentInfoKHR pi = *info;
     pi.pNext = &pid;
     const VkSwapchainKHR sc = info->pSwapchains[0];
-    const bool ll = low_latency.load(std::memory_order_relaxed);
+    const bool ll = low_latency.load(std::memory_order_relaxed) && swapchain_latency.load(std::memory_order_relaxed);
     if (ll)
         markerFor(sc, id, VK_LATENCY_MARKER_PRESENT_START_NV);
     const qint64 present_us = nowUs();
@@ -417,6 +444,20 @@ void onDeviceDestroyed()
     device = VK_NULL_HANDLE;
 }
 
+bool delayNextPresent(qint64 target_us, void (*done)(qint64, qint64, qint64))
+{
+    if (!real_queue_present || real_gipa == nullptr || device == VK_NULL_HANDLE)
+        return false;
+    present_done.store(done);
+    present_target_us.store(target_us);
+    return true;
+}
+
+void setLowLatencyEnabled(bool enabled)
+{
+    low_latency_wanted.store(enabled);
+}
+
 void markFrameStart()
 {
     if (!low_latency.load(std::memory_order_relaxed))
@@ -486,10 +527,12 @@ void appendDeviceExtensions(std::vector<const char *> &) {}
 const VkPhysicalDeviceFeatures2 *deviceFeatures() { return nullptr; }
 void onDeviceCreated(pl_vulkan) {}
 void onDeviceDestroyed() {}
+void setLowLatencyEnabled(bool) {}
 void markFrameStart() {}
 void markRenderSubmitted() {}
 void setRefreshRate(double) {}
 bool lastDisplayTime(qint64 *, qint64) { return false; }
+bool delayNextPresent(qint64, void (*)(qint64, qint64, qint64)) { return false; }
 QString takeDisplayStats() { return QString(); }
 bool lowLatencyActive() { return false; }
 bool presentWaitActive() { return false; }

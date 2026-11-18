@@ -566,6 +566,8 @@ class Settings : public QObject
 		// NVIDIA VFG 2x followed by DLSS Frame Generation 2x (4x in total).
 		bool GetFrameGenVfgChain() const { return settings.value("settings/frame_gen_vfg_chain", false).toBool(); }
 		void SetFrameGenVfgChain(bool enabled) { settings.setValue("settings/frame_gen_vfg_chain", enabled); }
+		bool GetNvidiaReflex() const { return settings.value("settings/nvidia_reflex", true).toBool(); }
+		void SetNvidiaReflex(bool enabled) { settings.setValue("settings/nvidia_reflex", enabled); }
 		// DLSS Frame Generation motion vectors: 0 = zero motion, 1 = Flow's motion search,
 		// 2 = Flow's motion search with the opposite sign (to compare the conventions).
 		int GetFrameGenDlssMotion() const { return qBound(0, settings.value("settings/frame_gen_dlss_motion", 1).toInt(), 2); }

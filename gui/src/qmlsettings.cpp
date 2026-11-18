@@ -1198,6 +1198,19 @@ void QmlSettings::setFrameGenVfgChain(bool enabled)
     emit frameGenVfgChainChanged();
 }
 
+bool QmlSettings::nvidiaReflex() const
+{
+    return settings->GetNvidiaReflex();
+}
+
+void QmlSettings::setNvidiaReflex(bool enabled)
+{
+    if (enabled == settings->GetNvidiaReflex())
+        return;
+    settings->SetNvidiaReflex(enabled);
+    emit nvidiaReflexChanged();
+}
+
 int QmlSettings::rcasStrength() const
 {
     return settings->GetRcasStrength();
