@@ -810,9 +810,10 @@ void StreamSession::Start()
 	}
 	session_started = true;
 
-	// Test mode for frame pacing checks: CHIAKI_TEST_PAN=<period s> holds the
-	// right stick right then left, alternating (after 8 s for the stream to
-	// settle); CHIAKI_TEST_DURATION=<s> ends the stream after that long.
+	// Test mode for frame pacing checks: CHIAKI_TEST_PAN=<period s> presses
+	// Circle (Xbox B) once after 5 s to leave a pause menu, then holds the
+	// right stick right then left, alternating (from 8 s on);
+	// CHIAKI_TEST_DURATION=<s> ends the stream after that long.
 	bool ok = false;
 	const int pan_period_s = qEnvironmentVariableIntValue("CHIAKI_TEST_PAN", &ok);
 	if(ok && pan_period_s > 0 && !test_pan_timer)
@@ -823,7 +824,16 @@ void StreamSession::Start()
 		test_pan_timer = new QTimer(this);
 		test_pan_timer->setInterval(16);
 		connect(test_pan_timer, &QTimer::timeout, this, [this, since, pan_period_s]() {
-			const qint64 ms = since->elapsed() - 8000;
+			const qint64 elapsed = since->elapsed();
+			const uint32_t buttons = elapsed >= 5000 && elapsed < 5200 ? CHIAKI_CONTROLLER_BUTTON_MOON : 0;
+			if(buttons != test_buttons)
+			{
+				test_buttons = buttons;
+				if(buttons)
+					CHIAKI_LOGI(log.GetChiakiLog(), "Test mode: pressing Circle to leave a pause menu");
+				SendFeedbackState();
+			}
+			const qint64 ms = elapsed - 8000;
 			if(ms < 0)
 				return;
 			const qint64 half = pan_period_s * 500;
@@ -1311,6 +1321,7 @@ void StreamSession::DpadSendFeedbackState()
 	chiaki_controller_state_or(&state, &state, &dpad_touch_state);
 	if(test_pan_active)
 		state.right_x = test_pan_x;
+	state.buttons |= test_buttons;
 	chiaki_session_set_controller_state(&session, &state);
 }
 
@@ -1369,6 +1380,7 @@ void StreamSession::SendFeedbackState()
 	chiaki_controller_state_or(&state, &state, &dpad_touch_state);
 	if(test_pan_active)
 		state.right_x = test_pan_x;
+	state.buttons |= test_buttons;
 	chiaki_session_set_controller_state(&session, &state);
 }
 

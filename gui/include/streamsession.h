@@ -243,6 +243,7 @@ class StreamSession : public QObject
 		QTimer *test_pan_timer = nullptr;
 		bool test_pan_active = false;
 		int16_t test_pan_x = 0;
+		uint32_t test_buttons = 0;
 		QElapsedTimer double_tap_timer;
 		RumbleHapticsIntensity rumble_haptics_intensity;
 		bool start_mic_unmuted;
