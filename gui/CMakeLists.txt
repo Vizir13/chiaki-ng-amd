@@ -116,8 +116,9 @@ target_link_libraries(chiaki PkgConfig::LIBPLACEBO placebo-libav-impl)
 
 target_link_libraries(chiaki chiaki-lib)
 if(WIN32)
-	# Stream tuning: MMCSS (avrt) and timer resolution (winmm); version for reading nvngx_vsr.dll file version.
-	target_link_libraries(chiaki avrt winmm version)
+	# Stream tuning: MMCSS (avrt) and timer resolution (winmm); version for reading nvngx_vsr.dll file version;
+	# dbghelp: minidumps on crashes (main.cpp).
+	target_link_libraries(chiaki avrt winmm version dbghelp)
 endif()
 
 if(CHIAKI_ENABLE_NGX)

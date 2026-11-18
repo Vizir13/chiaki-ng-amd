@@ -8009,7 +8009,10 @@ void QmlMainWindow::render()
     if (enhancement_log_reset.fetchAndStoreAcquire(0)) {
         rtx_vsr_active = false;
         fg_skip_logged = 0;
+        fg_vsr_wait_frames = 0;
     }
+    if (vsr_applied)
+        fg_vsr_wait_frames = -1;
 
     if (!fg_override && vsr_applied != rtx_vsr_active) {
         rtx_vsr_active = vsr_applied;
@@ -8037,7 +8040,21 @@ void QmlMainWindow::render()
             qCInfo(chiakiGui) << "Frame generation requires Direct Mapping and stays disabled";
     }
     bool fg_applied = fg_override;
-    if (!fg_override && direct_frame_fresh && fg_backend > 0 && stream_active && direct_render_frame.num_planes > 0) {
+    // At the start of a stream RTX VSR needs a few frames before its first
+    // output. Frame generation started meanwhile set up at the stream size
+    // and again at the upscaled size (NVIDIA VFG ~0.4 s each, on the render
+    // thread, so the window froze). Wait for VSR's first output, briefly.
+    bool fg_wait_for_vsr = false;
+    if (!fg_override && direct_frame_fresh && fg_vsr_wait_frames >= 0 && !vsr_applied && rtx_vsr_quality > 0 &&
+        nvidia_card && stream_active && !rtx_vsr->modeFailed(rtx_vsr_quality) &&
+        !RtxVsr::keepsResolution(rtx_vsr_quality)) {
+        if (++fg_vsr_wait_frames <= 30)
+            fg_wait_for_vsr = true;
+        else
+            fg_vsr_wait_frames = -1;
+    }
+    if (!fg_override && !fg_wait_for_vsr && direct_frame_fresh && fg_backend > 0 && stream_active &&
+        direct_render_frame.num_planes > 0) {
         const auto backend_choice = static_cast<FrameGen::Backend>(fg_backend);
         // With repeats dropped a picture lasts `cadence` stream frames; the
         // multiplier stays relative to the stream rate, so output fps is kept.

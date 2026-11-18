@@ -40,6 +40,13 @@ int main(int argc, char *argv[]) { return real_main(argc, argv); }
 #include <QCommandLineParser>
 #ifdef Q_OS_WIN
 #include "windowsStreamTuning.h"
+#include <QDir>
+#include <QStandardPaths>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <dbghelp.h>
 #endif
 #include <QMap>
 #include <QSurfaceFormat>
@@ -62,6 +69,51 @@ static const QMap<QString, CLICommand> cli_commands = {
 	{ "discover", { chiaki_cli_cmd_discover } },
 	{ "wakeup", { chiaki_cli_cmd_wakeup } }
 };
+#endif
+
+#ifdef Q_OS_WIN
+// Writes a minidump to <AppData>/Chiaki/Chiaki/crash when the process
+// crashes, so crashes inside drivers and runtimes (Vulkan, CUDA, NGX) can be
+// traced to the call that caused them. The path is prepared up front: the
+// handler runs in a broken process and only calls Win32.
+static wchar_t crash_dump_dir[MAX_PATH];
+
+static LONG WINAPI writeCrashDump(EXCEPTION_POINTERS *info)
+{
+	static volatile LONG entered = 0;
+	if (InterlockedExchange(&entered, 1))
+		return EXCEPTION_CONTINUE_SEARCH;
+	SYSTEMTIME t;
+	GetLocalTime(&t);
+	wchar_t path[MAX_PATH + 64];
+	swprintf(path, sizeof(path) / sizeof(path[0]), L"%ls\\chiaki-%04u%02u%02u-%02u%02u%02u-%lu.dmp", crash_dump_dir,
+		t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, GetCurrentProcessId());
+	HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (file != INVALID_HANDLE_VALUE) {
+		MINIDUMP_EXCEPTION_INFORMATION exception = {};
+		exception.ThreadId = GetCurrentThreadId();
+		exception.ExceptionPointers = info;
+		exception.ClientPointers = FALSE;
+		const auto type = static_cast<MINIDUMP_TYPE>(MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory |
+			MiniDumpWithUnloadedModules | MiniDumpWithProcessThreadData);
+		MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type, &exception, nullptr, nullptr);
+		CloseHandle(file);
+	}
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void installCrashDumps()
+{
+	const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/crash");
+	if (!QDir().mkpath(dir))
+		return;
+	const QString native = QDir::toNativeSeparators(dir);
+	if (native.size() >= MAX_PATH)
+		return;
+	native.toWCharArray(crash_dump_dir);
+	crash_dump_dir[native.size()] = 0;
+	SetUnhandledExceptionFilter(writeCrashDump);
+}
 #endif
 
 int RunStream(QGuiApplication &app, const StreamSessionConnectInfo &connect_info);
@@ -128,6 +180,9 @@ int real_main(int argc, char *argv[])
 	QtWebEngineQuick::initialize();
 #endif
 	QApplication app(argc, argv);
+#ifdef Q_OS_WIN
+	installCrashDumps();
+#endif
 
 #ifdef Q_OS_MACOS
 	QGuiApplication::setWindowIcon(QIcon(":/icons/chiaking_macos.svg"));

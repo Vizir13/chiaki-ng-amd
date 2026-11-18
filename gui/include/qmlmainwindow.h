@@ -398,6 +398,9 @@ private:
     pl_renderer placebo_renderer = {};
     RtxVsr *rtx_vsr = nullptr;
     bool rtx_vsr_active = false;
+    // Stream frames frame generation waited for RTX VSR's first output
+    // (-1: VSR has produced one this session, no more waiting).
+    int fg_vsr_wait_frames = 0;
     FrameGen *frame_gen = nullptr;
     // Frames still to be presented for the last stream frame: generated ones first, the real one last.
     std::vector<struct pl_frame> fg_pending_frames;
