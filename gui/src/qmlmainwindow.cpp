@@ -891,6 +891,48 @@ static std::atomic<qint64> fg_blocked_renders{0}; // renders skipped while a pre
 // frame), which frame generation then interpolates as no motion.
 static std::atomic<qint64> fg_repeat_frames{0};
 static PresentPathTiming fg_time_video_latency; // decoded stream frame -> its real frame rendered
+static PresentPathTiming fg_time_arrival_jitter; // stream frame arrival vs the smoothed clock
+static PresentPathTiming fg_time_present_jitter; // scheduled present interval error
+static PresentPathTiming fg_time_present_late;   // scheduled present past its target
+
+// Jitter buffer of 2x frame generation in ms (CHIAKI_FG_JITTER_MS, 0 = off).
+static qint64 frameGenJitterBufferUs()
+{
+    static const qint64 us = []() {
+        bool ok = false;
+        const int ms = qEnvironmentVariableIntValue("CHIAKI_FG_JITTER_MS", &ok);
+        return ok ? static_cast<qint64>(qBound(0, ms, 30)) * 1000 : qint64(8000);
+    }();
+    return us;
+}
+
+// Sleeps until `target_us` (monotonic), spinning for the last stretch.
+static void waitUntilMonotonicUs(qint64 target_us)
+{
+    for (;;) {
+        const qint64 now = static_cast<qint64>(chiaki_time_now_monotonic_us());
+        const qint64 remaining = target_us - now;
+        if (remaining <= 0)
+            return;
+        if (remaining > 1500)
+            QThread::usleep(static_cast<unsigned long>(remaining - 1000));
+        else
+            QThread::yieldCurrentThread();
+    }
+}
+
+// Records how a scheduled present met its target.
+static void recordScheduledPresent(qint64 target_us, qint64 submit_us)
+{
+    static qint64 prev_target_us = 0;
+    static qint64 prev_submit_us = 0;
+    fg_time_present_late.add(qMax<qint64>(0, submit_us - target_us));
+    const qint64 planned = target_us - prev_target_us;
+    if (prev_target_us > 0 && planned > 0 && planned < 100000)
+        fg_time_present_jitter.add(qAbs((submit_us - prev_submit_us) - planned));
+    prev_target_us = target_us;
+    prev_submit_us = submit_us;
+}
 
 static void logSwapInterval(qint64 now_us)
 {
@@ -6034,7 +6076,16 @@ void QmlMainWindow::processDeferredSwapTask(qint64 submit_begin_us,
     if (submit_begin_local_us >= submit_begin_us)
         logLatencyStats("submit_queue_delay", submit_begin_local_us - submit_begin_us);
 
-    if (present_submit_interval_us > 0) {
+    const qint64 scheduled_target_us = deferred_present_target_us.fetchAndStoreAcquire(0);
+    if (scheduled_target_us > 0) {
+        const qint64 pace_begin_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+        waitUntilMonotonicUs(scheduled_target_us);
+        const qint64 pace_end_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+        fg_time_pace.add(pace_end_us - pace_begin_us);
+        recordScheduledPresent(scheduled_target_us, pace_end_us);
+        // The regular pacing starts over when it is used again.
+        present_pacing_reset_pending.storeRelease(1);
+    } else if (present_submit_interval_us > 0) {
         const bool backpressure_active = queue_depth_at_submit >= qMax(2, depth_limit - 1) || pending_frame_waiting;
         const double pace_multiplier = pending_overflow_waiting
             ? 0.80
@@ -7084,6 +7135,7 @@ void QmlMainWindow::render()
     struct pl_frame fg_override_frame = {};
     bool fg_override = false;
     bool direct_frame_fresh = false;
+    fg_present_target_us = 0;
     // Generated frames whose textures frame generation has destroyed since
     // (it rebuilds them at another size) must not be rendered: that passed
     // freed images to the driver and crashed it, e.g. leaving fullscreen.
@@ -7118,6 +7170,8 @@ void QmlMainWindow::render()
         } else {
             fg_override_frame = fg_pending_frames.front();
             fg_pending_frames.erase(fg_pending_frames.begin());
+            if (fg_sched_base_us > 0)
+                fg_present_target_us = fg_sched_base_us + ++fg_sched_index * fg_sched_step_us;
             // The last one is the stream frame's real frame.
             if (fg_pending_frames.empty() && fg_pending_arrival_us > 0)
                 fg_time_video_latency.add(static_cast<qint64>(chiaki_time_now_monotonic_us()) - fg_pending_arrival_us);
@@ -7143,7 +7197,8 @@ void QmlMainWindow::render()
                 "acquire %1, render %2, pacing %3, submit %4, swap %5, present->next render %6, renders skipped while presenting %7"
                 "; GPU: final render %8 per present, RTX VSR %9 per stream frame"
                 "; CPU: VSR %10, frame generation %11, pl_render_image %12"
-                "; stream frame -> its real frame rendered %13; repeated pictures %14")
+                "; stream frame -> its real frame rendered %13; repeated pictures %14"
+                "; jitter buffer: arrival off clock %15, present interval error %16, present late %17")
                 .arg(fg_time_start_frame.take(), fg_time_render_work.take(), fg_time_pace.take(),
                      fg_time_submit.take(), fg_time_swap.take(), fg_time_handoff.take())
                 .arg(fg_blocked_renders.exchange(0))
@@ -7151,7 +7206,8 @@ void QmlMainWindow::render()
                 .arg(rtx_vsr ? rtx_vsr->gpuTimeMs() : 0.0f, 0, 'f', 2)
                 .arg(fg_time_vsr_cpu.take(), fg_time_fg_cpu.take(), fg_time_placebo_cpu.take())
                 .arg(fg_time_video_latency.take())
-                .arg(fg_repeat_frames.exchange(0));
+                .arg(fg_repeat_frames.exchange(0))
+                .arg(fg_time_arrival_jitter.take(), fg_time_present_jitter.take(), fg_time_present_late.take());
             if (fg_drop_log_us && fg_dropped_count + fg_shown_count > 0)
                 qCInfo(chiakiGui).nospace() << "[framegen] Present path in the last "
                     << (now_us - fg_drop_log_us) / 1000 << " ms (avg/max ms): " << present_path;
@@ -7506,7 +7562,11 @@ void QmlMainWindow::render()
             vulkan_deferred_swap_enabled &&
             deferred_swap_thread &&
             deferred_present_in_flight.loadAcquire() == 0;
-        if (!use_deferred_swap) {
+        if (!use_deferred_swap && present && fg_present_target_us > 0) {
+            waitUntilMonotonicUs(fg_present_target_us);
+            recordScheduledPresent(fg_present_target_us, static_cast<qint64>(chiaki_time_now_monotonic_us()));
+            present_pacing_reset_pending.storeRelease(1);
+        } else if (!use_deferred_swap) {
             if (present) {
                 const double pace_multiplier = pending_overflow_waiting
                     ? 0.80
@@ -7522,6 +7582,7 @@ void QmlMainWindow::render()
         bool async_present_completion = false;
         qint64 present_complete_us = submit_ready_us;
         if (use_deferred_swap) {
+            deferred_present_target_us.storeRelease(fg_present_target_us);
             const bool async_enqueued = enqueueDeferredSwap(submit_ready_us,
                                                             queue_depth_now,
                                                             depth_limit,
@@ -8165,6 +8226,31 @@ void QmlMainWindow::render()
                 direct_render_frame = fg_outputs.front();
                 fg_pending_frames.assign(fg_outputs.begin() + 1, fg_outputs.end());
                 fg_pending_arrival_us = direct_frame_arrival_us;
+                // 2x: present this stream frame's frames at a smoothed clock
+                // of the arrivals plus a small delay, so arrival jitter of the
+                // stream (up to the delay) does not reach the screen. Frames
+                // carried over from the previous stream frame keep the
+                // regular pacing.
+                fg_sched_base_us = 0;
+                const qint64 jitter_us = frameGenJitterBufferUs();
+                const qint64 period_us = static_cast<qint64>(llround(source_interval_s * 1000000.0));
+                if (multiplier == 2 && jitter_us > 0 && period_us > 0 && direct_frame_arrival_us > 0 &&
+                    fg_outputs.size() == 2) {
+                    const qint64 predicted_us = fg_arrival_est_us + period_us;
+                    const qint64 error_us = direct_frame_arrival_us - predicted_us;
+                    if (fg_arrival_est_us == 0 || qAbs(error_us) > 2 * period_us) {
+                        fg_arrival_est_us = direct_frame_arrival_us;
+                    } else {
+                        fg_time_arrival_jitter.add(qAbs(error_us));
+                        // Follows clock drift between console and PC slowly;
+                        // single late or early frames barely move it.
+                        fg_arrival_est_us = predicted_us + error_us / 10;
+                    }
+                    fg_sched_base_us = fg_arrival_est_us + jitter_us;
+                    fg_sched_step_us = period_us / multiplier;
+                    fg_sched_index = 0;
+                    fg_present_target_us = fg_sched_base_us;
+                }
                 if (fg_active_multiplier != multiplier || fg_active_cadence != cadence)
                     qCInfo(chiakiGui).nospace() << "Frame generation active: " << FrameGen::backendName(backend_choice)
                                       << " " << multiplier << "x"

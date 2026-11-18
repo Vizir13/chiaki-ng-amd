@@ -305,6 +305,16 @@ private:
     qint64 direct_pending_arrival_us = 0;
     qint64 direct_frame_arrival_us = 0;
     qint64 fg_pending_arrival_us = 0;
+    // Jitter buffer for 2x frame generation: presents follow a smoothed clock
+    // of the stream frames' arrivals plus a small delay instead of each
+    // arrival (render thread). fg_present_target_us is the time the frame
+    // being rendered should go out (0: the regular pacing).
+    qint64 fg_arrival_est_us = 0;
+    qint64 fg_sched_base_us = 0;
+    qint64 fg_sched_step_us = 0;
+    int fg_sched_index = 0;
+    qint64 fg_present_target_us = 0;
+    QAtomicInteger<qint64> deferred_present_target_us = 0;
     struct pl_frame direct_frame = {};
     QAtomicInteger<int> direct_frame_reset = 0;
     uint64_t ts_start = 0;
