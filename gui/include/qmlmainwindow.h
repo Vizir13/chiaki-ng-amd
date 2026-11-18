@@ -457,6 +457,8 @@ private:
     float kept_frame_duration = 0.0f;
     AVFrame *fallback_frame = nullptr;
     QAtomicInteger<int> swapchain_recreate_pending = 0;
+    // The swapchain was created with the deeper queue used for frame generation.
+    bool swapchain_frame_gen_depth = false;
     QAtomicInteger<int> vulkan_device_lost = 0;
     QAtomicInteger<int> renderer_cache_flush_pending = 0;
     QAtomicInteger<int> placebo_reset_pending = 0;

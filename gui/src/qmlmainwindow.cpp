@@ -6277,7 +6277,16 @@ void QmlMainWindow::createSwapchain()
     surface_create_failures.storeRelease(0);
     surface_create_failure_first_us = 0;
 
-    const int swapchain_depth = 1;
+    // With depth 1 every swap waits for the previous frame to finish on the
+    // GPU. Frame generation shares the GPU with long CUDA work (NVIDIA VFG
+    // High runs ~11 ms), so that wait delayed the next presents past the next
+    // stream frame and generated frames were dropped. One more frame in
+    // flight keeps the renders going while the GPU is busy.
+    int swapchain_depth = settings->GetFrameGenBackend() > 0 ? 2 : 1;
+    const int swapchain_depth_override = qEnvironmentVariableIntValue("CHIAKI_SWAPCHAIN_DEPTH");
+    if (swapchain_depth_override >= 1 && swapchain_depth_override <= 4)
+        swapchain_depth = swapchain_depth_override;
+    swapchain_frame_gen_depth = settings->GetFrameGenBackend() > 0;
     struct pl_vulkan_swapchain_params swapchain_params = {
         .surface = surface,
         // Prefer MAILBOX for vsync (lower) latency when supported).
@@ -6290,7 +6299,7 @@ void QmlMainWindow::createSwapchain()
     if (!placebo_swapchain && !settings->GetVSyncEnabled()) {
         qCWarning(chiakiGui) << "Immediate present mode unsupported, falling back to FIFO VSync";
         swapchain_params.present_mode = VK_PRESENT_MODE_FIFO_KHR;
-        swapchain_params.swapchain_depth = 1;
+        swapchain_params.swapchain_depth = swapchain_depth;
         placebo_swapchain = pl_vulkan_create_swapchain(placebo_vulkan, &swapchain_params);
         present_vsync_enabled = true;
     }
@@ -7992,6 +8001,11 @@ void QmlMainWindow::render()
     const int fg_backend = frame_gen && has_settings ? settings->GetFrameGenBackend() : 0;
     if (fg_backend != fg_last_backend) {
         fg_last_backend = fg_backend;
+        // Frame generation was turned on or off: rebuild the swapchain with
+        // the matching depth (see createSwapchain).
+        if (has_settings && (fg_backend > 0) != swapchain_frame_gen_depth &&
+            !qEnvironmentVariableIsSet("CHIAKI_SWAPCHAIN_DEPTH"))
+            swapchain_recreate_pending.storeRelease(1);
         fg_pending_frames.clear();
         fg_carry_frames.clear();
         fg_active_multiplier = 1;
