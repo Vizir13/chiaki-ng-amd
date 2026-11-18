@@ -1,10 +1,22 @@
 ![chiaki-ng Logo](gui/res/chiaking-logo.svg)
 
-# chiaki-ng-enhanced
+# chiaki-ng-amd
 
-A fork of [chiaki-ng](https://github.com/streetpea/chiaki-ng) (the open source PlayStation 4/5 Remote Play client) that adds video enhancement and smoother streaming on top of upstream: NVIDIA RTX Video Super Resolution, four frame generation backends (NVIDIA VFG, DLSS, FSR and its own **Flow** interpolation; FSR and Flow also run on Linux and Steam Deck), an ambient border for ultrawide displays and a set of Windows streaming tweaks and fixes.
+A fork of [chiaki-ng-enhanced](https://github.com/FzeNiX/chiaki-ng-enhanced) (itself a fork of [chiaki-ng](https://github.com/streetpea/chiaki-ng)) tuned for playing 30 fps PS5 games smoothly on a PC with an AMD GPU, using frame generation on the Remote Play stream.
 
-Everything else (setup, registration, controllers, Steam Deck usage) works as in upstream chiaki-ng – see its [documentation site](https://streetpea.github.io/chiaki-ng/).
+Changes on top of chiaki-ng-enhanced:
+
+- **Up to date with chiaki-ng**: 89 upstream commits merged, including security fixes (bounded STUN / PSN / HTTP data, PIN kept out of the logs) and crash fixes.
+- **Paced presentation for frame generation** (`gui/include/fgpacer.h`): each picture's frames are spread evenly over its period behind a small adaptive jitter buffer, instead of a fixed clock that dropped the remaining generated frames whenever a picture arrived early. Simulated over Wi-Fi jitter (30 fps to 4x): frame time variation 8.6 ms to 0.45 ms, dropped generated frames 39% to 0%, for about 5 ms of added latency. Frames are presented with a high resolution waitable timer.
+- **Robust repeat detection** for 30 fps games in a 60 fps stream (a key frame no longer breaks it; restarts with each stream).
+- **Better Flow interpolation**, measured with the new `chiaki-fgbench` tool on a Radeon RX 7900 XTX: smoother motion field (no more torn object edges on flat surfaces), quarter-texel refinement, trajectory-correct motion lookup for 3x/4x: up to +2.1 dB PSNR, broken frames 13/90 to 0/90 on a foliage scene, under 1.3 ms GPU time at 1080p.
+- Fixes: use-after-free in the stats overlay, duplicated motion search with Flow.
+
+![Flow before / after / real frame](docs/images/flow-before-after.png)
+
+*Left: Flow before, middle: Flow now, right: the real frame.*
+
+Recommended on AMD: Settings > Video > Frame Generation = Flow, multiplier 4x, Frame Delivery = Direct Mapping, Vulkan renderer, HDR off, display at 120 Hz or with FreeSync.
 
 ## Downloads
 
