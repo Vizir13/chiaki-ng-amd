@@ -8352,7 +8352,7 @@ void QmlMainWindow::render()
                     const double make_ms = (vsr_applied && rtx_vsr ? rtx_vsr->gpuTimeMs() : 0.0f) +
                                            frame_gen->gpuTimeMs();
                     // Plus how late stream frames come against the clock: the
-                    // 90th percentile of the last ~4 s (3 ms flat let frames
+                    // 90th percentile of the last ~10 s (3 ms flat let frames
                     // 16-22 ms late through as a skipped beat).
                     qint64 late_p90_us = 3000;
                     if (fg_late_history.size() >= 30) {
@@ -8363,14 +8363,30 @@ void QmlMainWindow::render()
                     }
                     const qint64 needed_us = qBound<qint64>(jitter_floor_us,
                         static_cast<qint64>(make_ms * 1000.0) + late_p90_us, period_us * 9 / 10);
-                    // Moving the delay moves every present once: only on a
-                    // real change.
-                    if (fg_jitter_delay_us == 0 || qAbs(needed_us - fg_jitter_delay_us) > 2000) {
-                        if (fg_jitter_delay_us != 0 || needed_us != jitter_floor_us)
-                            qCInfo(chiakiGui).nospace() << "[framegen] Jitter buffer delay " << needed_us / 1000.0
-                                << " ms (VSR + generation GPU " << make_ms << " ms, late arrivals p90 "
-                                << late_p90_us / 1000.0 << " ms)";
-                        fg_jitter_delay_us = needed_us;
+                    // Moving the delay moves one present (a visible hitch);
+                    // following every swing of the percentile did that every
+                    // few seconds. Raise it at once with some headroom, lower
+                    // it only after the need stayed well below for 5 s.
+                    const qint64 now_sched_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+                    qint64 new_delay_us = fg_jitter_delay_us;
+                    if (fg_jitter_delay_us == 0 || needed_us > fg_jitter_delay_us) {
+                        new_delay_us = qMin<qint64>(needed_us + 1500, period_us * 9 / 10);
+                        fg_jitter_lower_since_us = 0;
+                    } else if (needed_us + 4000 < fg_jitter_delay_us) {
+                        if (fg_jitter_lower_since_us == 0)
+                            fg_jitter_lower_since_us = now_sched_us;
+                        else if (now_sched_us - fg_jitter_lower_since_us > 5000000) {
+                            new_delay_us = needed_us + 1500;
+                            fg_jitter_lower_since_us = 0;
+                        }
+                    } else {
+                        fg_jitter_lower_since_us = 0;
+                    }
+                    if (new_delay_us != fg_jitter_delay_us) {
+                        qCInfo(chiakiGui).nospace() << "[framegen] Jitter buffer delay " << new_delay_us / 1000.0
+                            << " ms (VSR + generation GPU " << make_ms << " ms, late arrivals p90 "
+                            << late_p90_us / 1000.0 << " ms)";
+                        fg_jitter_delay_us = new_delay_us;
                     }
                     const qint64 jitter_us = fg_jitter_delay_us;
                     // The real period differs from the configured one (console
@@ -8394,10 +8410,10 @@ void QmlMainWindow::render()
                     } else {
                         fg_time_arrival_jitter.add(qAbs(error_us));
                         const qint64 late_us = qMax<qint64>(0, error_us);
-                        if (fg_late_history.size() < 120)
+                        if (fg_late_history.size() < 300)
                             fg_late_history.push_back(late_us);
                         else
-                            fg_late_history[fg_late_index++ % 120] = late_us;
+                            fg_late_history[fg_late_index++ % 300] = late_us;
                         // Single late or early frames barely move the clock.
                         fg_arrival_est_us = predicted_us + error_us / 10;
                     }
