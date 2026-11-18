@@ -127,6 +127,11 @@ struct FrameGen::Impl
 
     VkQueue queue = VK_NULL_HANDLE;
     uint32_t queue_family = 0;
+    // A graphics queue libplacebo does not use (it creates all queues of
+    // the family but submits to the first one only): waiting there for
+    // NVIDIA VFG's CUDA work does not hold up the frames libplacebo renders
+    // and presents meanwhile. 0 when the family has a single queue.
+    uint32_t queue_index = 0;
     VkCommandPool pool = VK_NULL_HANDLE;
     std::array<CommandSlot, kCommandSlots> cmd_slots = {};
     size_t next_slot = 0;
@@ -274,7 +279,22 @@ bool FrameGen::Impl::initCommon(pl_vulkan vk_)
         return false;
 
     queue_family = vk->queue_graphics.index;
-    vkGetDeviceQueue(vk->device, queue_family, 0, &queue);
+    queue_index = 0;
+    {
+        auto get_qf_props = reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
+            vk->get_proc_addr(vk->instance, "vkGetPhysicalDeviceQueueFamilyProperties"));
+        if (get_qf_props) {
+            uint32_t count = 0;
+            get_qf_props(vk->phys_device, &count, nullptr);
+            std::vector<VkQueueFamilyProperties> props(count);
+            get_qf_props(vk->phys_device, &count, props.data());
+            if (queue_family < count && props[queue_family].queueCount > static_cast<uint32_t>(vk->queue_graphics.count))
+                queue_index = static_cast<uint32_t>(vk->queue_graphics.count);
+        }
+    }
+    vkGetDeviceQueue(vk->device, queue_family, queue_index, &queue);
+    qCInfo(chiakiGui) << "[framegen] Submitting to graphics queue" << queue_index
+                      << (queue_index ? "(separate from the renderer's)" : "(shared with the renderer)");
     if (!queue)
         return false;
 
@@ -550,9 +570,9 @@ bool FrameGen::Impl::submitEx(VkCommandBuffer cmd, FgImage *const *waits, size_t
     submit_info.signalSemaphoreCount = static_cast<uint32_t>(signal_sems.size());
     submit_info.pSignalSemaphores = signal_sems.data();
 
-    vk->lock_queue(vk, queue_family, 0);
+    vk->lock_queue(vk, queue_family, queue_index);
     const VkResult res = vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE);
-    vk->unlock_queue(vk, queue_family, 0);
+    vk->unlock_queue(vk, queue_family, queue_index);
     if (res != VK_SUCCESS) {
         qCWarning(chiakiGui) << "[framegen] vkQueueSubmit failed, result" << static_cast<int>(res);
         return false;

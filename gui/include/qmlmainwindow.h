@@ -395,6 +395,9 @@ private:
     FrameGen *frame_gen = nullptr;
     // Frames still to be presented for the last stream frame: generated ones first, the real one last.
     std::vector<struct pl_frame> fg_pending_frames;
+    // Frames of the previous stream frame still to be shown while the next
+    // one is generated (shown before its frames).
+    std::vector<struct pl_frame> fg_carry_frames;
     int fg_active_multiplier = 1;
     int fg_active_cadence = 1;
     int fg_last_backend = 0;

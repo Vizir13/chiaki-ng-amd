@@ -7009,22 +7009,28 @@ void QmlMainWindow::render()
             incoming_waiting = direct_pending_frame != nullptr;
         }
         // A new stream frame is already waiting while frames of this one are
-        // left. The first of them only becomes ready after the whole
-        // generation (e.g. VFG + DLSS FG ~15 ms), so the rest regularly
-        // runs past the next stream frame; dropping them all made 4x come
-        // out at ~3x. Fall at most one generated frame behind instead (the
-        // next stream frame waits up to two display refreshes), and drop
-        // only what is beyond that.
-        if (incoming_waiting && fg_pending_frames.size() > 2) {
-            const auto drop = static_cast<std::ptrdiff_t>(fg_pending_frames.size() - 2);
-            fg_dropped_count += drop;
-            fg_pending_frames.erase(fg_pending_frames.begin(), fg_pending_frames.begin() + drop);
+        // left. The first generated frame of a stream frame is only ready
+        // after the whole generation (e.g. VFG + DLSS FG, 15-20 ms), so the
+        // rest regularly runs past the next stream frame; dropping them made
+        // 4x come out at ~3x, and waiting for them delayed the next
+        // generation. Pipeline instead: generate the waiting stream frame
+        // now and show the frames left of this one first (at most the last
+        // generated one and the real one; older ones are dropped).
+        if (incoming_waiting) {
+            if (fg_pending_frames.size() > 2) {
+                const auto drop = static_cast<std::ptrdiff_t>(fg_pending_frames.size() - 2);
+                fg_dropped_count += drop;
+                fg_pending_frames.erase(fg_pending_frames.begin(), fg_pending_frames.begin() + drop);
+            }
+            fg_carry_frames.assign(fg_pending_frames.begin(), fg_pending_frames.end());
+            fg_pending_frames.clear();
+        } else {
+            fg_override_frame = fg_pending_frames.front();
+            fg_pending_frames.erase(fg_pending_frames.begin());
+            if (!fg_pending_frames.empty())
+                fg_shown_count++;
+            fg_override = true;
         }
-        fg_override_frame = fg_pending_frames.front();
-        fg_pending_frames.erase(fg_pending_frames.begin());
-        if (!fg_pending_frames.empty())
-            fg_shown_count++;
-        fg_override = true;
         // The generation (and the frames before it) took too long for the
         // display rate when generated frames are dropped: report it.
         const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
@@ -7913,6 +7919,7 @@ void QmlMainWindow::render()
     if (fg_backend != fg_last_backend) {
         fg_last_backend = fg_backend;
         fg_pending_frames.clear();
+        fg_carry_frames.clear();
         fg_active_multiplier = 1;
         fg_active_cadence = 1;
         if (frame_gen)
@@ -7975,6 +7982,13 @@ void QmlMainWindow::render()
                     QFile::remove(frameGenCrashGuardPath());
                     fg_crash_guard_armed = false;
                 }
+                if (!fg_carry_frames.empty()) {
+                    // The previous stream frame's remaining frames go first.
+                    fg_shown_count += static_cast<qint64>(fg_carry_frames.size()) - 1;
+                    fg_carry_frames.insert(fg_carry_frames.end(), fg_outputs.begin(), fg_outputs.end());
+                    fg_outputs.swap(fg_carry_frames);
+                    fg_carry_frames.clear();
+                }
                 direct_render_frame = fg_outputs.front();
                 fg_pending_frames.assign(fg_outputs.begin() + 1, fg_outputs.end());
                 if (fg_active_multiplier != multiplier || fg_active_cadence != cadence)
@@ -7986,6 +8000,11 @@ void QmlMainWindow::render()
                 fg_applied = true;
             }
         }
+    }
+    if (!fg_carry_frames.empty()) {
+        // No generation for the new stream frame: its real frame wins.
+        fg_dropped_count += static_cast<qint64>(fg_carry_frames.size());
+        fg_carry_frames.clear();
     }
     if (direct_frame_fresh && !fg_applied && fg_active_multiplier != 1) {
         qCInfo(chiakiGui) << "Frame generation inactive";
