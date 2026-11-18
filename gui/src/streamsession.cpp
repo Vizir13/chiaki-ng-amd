@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-AGPL-3.0-only-OpenSSL
 
 #include <streamsession.h>
+#include <QDateTime>
 #include <settings.h>
 #include <controllermanager.h>
 
@@ -2001,6 +2002,30 @@ void StreamSession::QueueAudioOutData(const QByteArray &audio_data)
 			memcpy(audio_out_ring_buf.data(), data + first_copy, data_size - first_copy);
 		audio_out_ring_write_pos = (audio_out_ring_write_pos + data_size) % capacity;
 		audio_out_ring_fill += data_size;
+
+		// Audio arrives at the rate it plays, so a backlog never drains by
+		// itself: one built up while the stream started (the render thread
+		// sets up video enhancements for ~1 s) stayed as latency for the whole
+		// session, up to the ring's size (8 buffers: 400 ms by default). Keep
+		// at most one buffer waiting here on top of the SDL queue (2 buffers),
+		// dropping the oldest audio.
+		const size_t backlog_limit = (size_t)audio_buffer_size * 2;
+		if(audio_out_ring_fill > backlog_limit)
+		{
+			size_t bytes_to_drop = audio_out_ring_fill - (size_t)audio_buffer_size;
+			bytes_to_drop -= bytes_to_drop % audio_out_sample_size;
+			audio_out_ring_read_pos = (audio_out_ring_read_pos + bytes_to_drop) % capacity;
+			audio_out_ring_fill -= bytes_to_drop;
+			audio_out_trimmed_bytes += bytes_to_drop;
+		}
+		const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+		if(audio_out_trimmed_bytes && now_ms - audio_out_trim_log_ms >= 5000)
+		{
+			CHIAKI_LOGI(log.GetChiakiLog(), "Audio output: dropped %llu ms of queued backlog to keep the latency low",
+				(unsigned long long)(audio_out_trimmed_bytes * 1000 / (audio_out_sample_size * 48000)));
+			audio_out_trimmed_bytes = 0;
+			audio_out_trim_log_ms = now_ms;
+		}
 	}
 
 	{
