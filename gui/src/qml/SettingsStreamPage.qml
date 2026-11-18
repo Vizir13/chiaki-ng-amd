@@ -512,14 +512,15 @@ C.SettingsPage {
             C.ComboBox {
                 Layout.preferredWidth: 400
                 enabled: Chiaki.settings.showStreamStats
-                model: [qsTr("Mini (one line: fps, Mbps)"), qsTr("Compact (one line: stats + enhancements)"),
-                    qsTr("Default (small column)"), qsTr("Full (all stats, one enhancement per line)")]
+                // Click the pill during a stream to open or close the details
+                model: [qsTr("Pill (fps, frame gen, Reflex, latency)"), qsTr("Pill + bitrate and packet loss"),
+                    qsTr("Pill + details open"), qsTr("Pill + details, every number")]
                 currentIndex: Chiaki.settings.streamStatsStyle
                 onActivated: index => Chiaki.settings.streamStatsStyle = index
             }
             Label {
                 Layout.alignment: Qt.AlignRight
-                text: qsTr("(Default)")
+                text: qsTr("(Pill + details open)")
             }
             Label {
                 Layout.alignment: Qt.AlignRight

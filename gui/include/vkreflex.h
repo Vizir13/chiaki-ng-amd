@@ -54,6 +54,10 @@ void setRefreshRate(double hz);
 bool lastDisplayTime(qint64 *display_us, qint64 max_age_us);
 // Display timing since the last call, empty when present wait is off.
 QString takeDisplayStats();
+// The last frames that reached the screen, oldest first: how many display
+// refreshes each stayed (up to max, at most 120). Does not reset anything.
+// latency_ms: their average present -> on screen time; hz: refresh rate.
+int recentPacing(int *refreshes_out, int max, double *latency_ms, double *hz);
 bool lowLatencyActive();
 bool presentWaitActive();
 

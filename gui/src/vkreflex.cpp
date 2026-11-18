@@ -94,6 +94,12 @@ qint64 latency_sum_us = 0, latency_max_us = 0, latency_count = 0;
 qint64 kind_sum_us[3] = {}, kind_max_us[3] = {}, kind_count[3] = {};
 qint64 refreshes[6] = {}; // frames shown for 1..5, 6+ refreshes
 qint64 timeouts = 0;
+// The last frames on screen for the stream overlay (not reset by
+// takeDisplayStats): refreshes each one stayed, present -> on screen.
+constexpr int pace_ring_size = 120;
+int pace_refreshes[pace_ring_size] = {};
+qint64 pace_latency_us[pace_ring_size] = {};
+int pace_head = 0, pace_count = 0;
 
 void markerFor(VkSwapchainKHR sc, uint64_t id, VkLatencyMarkerNV marker)
 {
@@ -134,6 +140,10 @@ void recordDisplay(const PendingPresent &p, qint64 display_us)
         if (refresh_period_us > 0.0) {
             const int n = qBound(1, static_cast<int>(interval / refresh_period_us + 0.5), 6);
             refreshes[n - 1]++;
+            pace_refreshes[pace_head] = n;
+            pace_latency_us[pace_head] = qMax<qint64>(0, display_us - p.present_us);
+            pace_head = (pace_head + 1) % pace_ring_size;
+            pace_count = qMin(pace_count + 1, pace_ring_size);
         }
     }
     const qint64 latency = display_us - p.present_us;
@@ -894,6 +904,25 @@ QString takeDisplayStats()
     return s;
 }
 
+int recentPacing(int *refreshes_out, int max, double *latency_ms, double *hz)
+{
+    if (!present_wait.load(std::memory_order_relaxed))
+        return 0;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const int n = qMin(max, pace_count);
+    qint64 latency_sum = 0;
+    for (int i = 0; i < n; i++) {
+        const int idx = (pace_head - n + i + pace_ring_size) % pace_ring_size;
+        refreshes_out[i] = pace_refreshes[idx];
+        latency_sum += pace_latency_us[idx];
+    }
+    if (latency_ms)
+        *latency_ms = n ? latency_sum / static_cast<double>(n) / 1000.0 : 0.0;
+    if (hz)
+        *hz = refresh_period_us > 0.0 ? 1000000.0 / refresh_period_us : 0.0;
+    return n;
+}
+
 bool lowLatencyActive() { return low_latency.load(); }
 bool presentWaitActive() { return present_wait.load(); }
 
@@ -912,6 +941,7 @@ void setRefreshRate(double) {}
 bool lastDisplayTime(qint64 *, qint64) { return false; }
 bool delayNextPresent(qint64, void (*)(qint64, qint64, qint64)) { return false; }
 QString takeDisplayStats() { return QString(); }
+int recentPacing(int *, int, double *, double *) { return 0; }
 bool lowLatencyActive() { return false; }
 bool presentWaitActive() { return false; }
 
