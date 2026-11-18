@@ -51,6 +51,12 @@ public:
     bool motionVectors(pl_tex prev, pl_tex cur, pl_tex out, bool *written,
                        float scale = 1.0f, bool reuse_analysis = false, float t = 1.0f);
 
+    // Depth for DLSS Frame Generation from the last motion search, which must
+    // have been made for `prev` and `cur`: content moving unlike the frame's
+    // dominant motion gets `near_depth`, the rest `far_depth`, for the pixels
+    // of the frame at time `t` (1 = `cur`). `out`: storable r32f, size of cur.
+    bool pseudoDepth(pl_tex prev, pl_tex cur, pl_tex out, float t, float near_depth, float far_depth);
+
     // Drops all size dependent state.
     void invalidate();
 

@@ -124,10 +124,18 @@ if (fxDetail > 0 && fx_inside(qc) && fx_inside(qp)) {
     // switches to a single unfiltered sample.
     vec3 fa = textureLod(fxCur, (qc + 0.5) * inv, 0.0).rgb;
     vec3 fb = textureLod(fxPrev, (qp + 0.5) * inv, 0.0).rgb;
-    if (fx_diff(fa, fb) > fxThreshold) {
+    // Blended in gradually, both in how much the frames disagree and in
+    // which of the two samples is closer: a hard switch flipped between
+    // them from pixel to pixel around moving characters (visible noise).
+    float mismatch = fx_diff(fa, fb);
+    if (mismatch > 0.5 * fxThreshold) {
         vec3 a = fx_fetch_cur(qc);
         vec3 b = fx_fetch_prev(qp);
-        g.rgb = fx_diff(a, g.rgb) <= fx_diff(b, g.rgb) ? a : b;
+        float da = fx_diff(a, g.rgb);
+        float db = fx_diff(b, g.rgb);
+        float wa = smoothstep(0.3, 0.7, db / max(da + db, 1e-4));
+        vec3 pick = mix(b, a, wa);
+        g.rgb = mix(g.rgb, pick, smoothstep(0.5 * fxThreshold, 1.5 * fxThreshold, mismatch));
     }
 }
 

@@ -62,6 +62,10 @@ constexpr size_t kCommandSlots = 8;
 constexpr uint64_t kWaitTimeoutNs = 2000000000ull;
 // Video has no depth; a constant mid-range value keeps disocclusion logic neutral.
 constexpr float kConstantDepth = 0.5f;
+// Pseudo depth for DLSS FG in the VFG chain (FlowInterpolator::pseudoDepth):
+// device depth of the virtual camera (fillCamera) at ~1 and ~100 units.
+constexpr float kNearDepth = 0.9f;
+constexpr float kFarDepth = 0.999f;
 constexpr int kMaxConsecutiveFailures = 3;
 
 } // namespace
@@ -161,6 +165,10 @@ struct FrameGen::Impl
     bool motion_flow_logged = false;
     bool mvecs_from_flow = false;
     bool mvec_dirty = false;
+    // `depth` holds pseudo depth instead of kConstantDepth.
+    bool depth_dirty = false;
+    // CHIAKI_FG_PSEUDO_DEPTH=0 keeps the flat depth (for comparison).
+    bool pseudo_depth = qEnvironmentVariable("CHIAKI_FG_PSEUDO_DEPTH") != QStringLiteral("0");
     // Clean-up of the generated frames (FgFixup): 0 off, 1 static content
     // only, 2 static content and detail.
     int cleanup_mode = 2;
@@ -220,6 +228,15 @@ struct FrameGen::Impl
     bool ensureImage(FgImage &img, int w, int h, pl_fmt fmt, bool renderable, bool clearable);
     void destroyImage(FgImage &img);
     void destroyImages();
+    bool restoreDepth()
+    {
+        const float depth_clear[4] = { kConstantDepth, 0.0f, 0.0f, 0.0f };
+        const float depth_value = kConstantDepth;
+        if (!fillConstant(depth, depth_clear, &depth_value, sizeof(depth_value)))
+            return false;
+        depth_dirty = false;
+        return true;
+    }
     uint64_t textures_generation = 0;
     bool ensureSize(int w, int h, const std::function<void(const char *)> &trace);
     bool fillConstant(FgImage &img, const float value[4], const void *texel, size_t texel_size);
@@ -511,6 +528,7 @@ bool FrameGen::Impl::ensureSize(int w, int h, const std::function<void(const cha
 
     width = w;
     height = h;
+    depth_dirty = false;
     have_history = false;
     return true;
 }
@@ -1719,6 +1737,17 @@ static bool runVfgChain(FrameGen::Impl &d, std::vector<struct pl_frame> &outputs
         d.mvecs_from_flow = written;
         if (written)
             d.mvec_dirty = true;
+        bool depth_written = false;
+        if (written && d.pseudo_depth) {
+            const float t = x == flow_real ? 1.0f : 0.5f;
+            depth_written = d.motion_flow->pseudoDepth(flow_prev, flow_real->tex, d.depth.tex, t, kNearDepth, kFarDepth);
+        }
+        if (depth_written) {
+            d.depth_dirty = true;
+        } else if (d.depth_dirty) {
+            if (!d.restoreDepth())
+                return fail("could not reset the depth");
+        }
         // A reset call only gives DLSS its history; its output is not shown.
         FgImage &target = out[std::min<size_t>(used, out.size() - 1)];
         bool crashed = false;
@@ -1950,6 +1979,10 @@ bool FrameGen::processFrames(const struct pl_frame *src, int out_w, int out_h, i
             return false;
         d.mvec_dirty = false;
     }
+
+    // Other backends and plain DLSS FG get the flat depth.
+    if (d.depth_dirty && !d.restoreDepth())
+        return false;
 
     if (d.backend == FrameGen::Backend::Vfg)
         return d.processVfg(set, count, outputs, trace_step);

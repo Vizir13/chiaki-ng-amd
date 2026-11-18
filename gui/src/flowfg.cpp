@@ -191,6 +191,69 @@ for (int j = 0; j < 2; j++) {
 imageStore(fgDst, p, vec4(n * 0.25, 0.0, 0.0, 1.0));
 )GLSL";
 
+// Dominant motion of the frame (camera pan, or the background behind a
+// moving character): trimmed mean of the coarsest flow level, narrowed to the
+// vectors near the current estimate a few times.
+const char *kGlobalBody = R"GLSL(
+if (gl_GlobalInvocationID.x != 0u || gl_GlobalInvocationID.y != 0u)
+    return;
+ivec2 n = ivec2(fgSize);
+vec2 g = vec2(0.0);
+for (int y = 0; y < n.y; y++)
+    for (int x = 0; x < n.x; x++)
+        g += texelFetch(fgCoarse, ivec2(x, y), 0).xy;
+g /= float(max(n.x * n.y, 1));
+float r = 1e9;
+for (int it = 0; it < 4; it++) {
+    vec2 sum = vec2(0.0);
+    float count = 0.0;
+    float spread = 0.0;
+    for (int y = 0; y < n.y; y++) {
+        for (int x = 0; x < n.x; x++) {
+            vec2 v = texelFetch(fgCoarse, ivec2(x, y), 0).xy;
+            float d = length(v - g);
+            if (d <= r) {
+                sum += v;
+                count += 1.0;
+                spread += d;
+            }
+        }
+    }
+    if (count < 1.0)
+        break;
+    g = sum / count;
+    r = max(2.0, spread / count);
+}
+imageStore(fgDst, ivec2(0), vec4(g, 0.0, 1.0));
+)GLSL";
+
+// Depth for DLSS Frame Generation, which has none from a video: content that
+// moves unlike the dominant motion (a character over a panning background,
+// or moving in front of a still one) is put near, the rest far. With a flat
+// depth DLSS cannot tell which side of an edge is in front and smears the
+// background around moving characters. The mask is widened over the flow's
+// neighbours to cover the edges; `fgT` places it at the time of the frame
+// the depth is for (motion is measured at the later frame, t = 1).
+const char *kDepthBody = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+if (p.x >= int(fgSize.x) || p.y >= int(fgSize.y))
+    return;
+vec2 c = vec2(p) + 0.5;
+vec2 g = texelFetch(fgGlobal, ivec2(0), 0).xy;
+vec2 to_flow = fgFlowSize / fgSize;
+vec2 v0 = textureLod(fgFlow, c * to_flow / fgFlowSize, 0.0).xy;
+vec2 q = c + (1.0 - fgT) * v0;
+ivec2 fp = ivec2(floor(q * to_flow));
+ivec2 fmax = ivec2(fgFlowSize) - 1;
+float dev = 0.0;
+for (int j = -1; j <= 1; j++)
+    for (int i = -1; i <= 1; i++)
+        dev = max(dev, length(texelFetch(fgFlow, clamp(fp + ivec2(i, j), ivec2(0), fmax), 0).xy - g));
+float lo = 2.0 + 0.15 * length(g);
+float fore = smoothstep(lo, 2.0 * lo + 2.0, dev);
+imageStore(fgOutImg, p, vec4(mix(fgFar, fgNear, fore), 0.0, 0.0, 0.0));
+)GLSL";
+
 const char *kStatsBody = R"GLSL(
 if (gl_GlobalInvocationID.x != 0u || gl_GlobalInvocationID.y != 0u)
     return;
@@ -457,6 +520,7 @@ struct FlowInterpolator::Impl
     pl_tex analyzed_prev = nullptr;
     pl_tex analyzed_cur = nullptr;
     pl_tex stats = nullptr;
+    pl_tex global = nullptr; // dominant motion (pseudoDepth)
     // Bound where a pass needs no input (every descriptor of a pass must be
     // a distinct texture).
     pl_tex dummy = nullptr;
@@ -502,6 +566,7 @@ void FlowInterpolator::Impl::destroyTextures()
     for (auto &tex : final_flow)
         pl_tex_destroy(gpu, &tex);
     pl_tex_destroy(gpu, &stats);
+    pl_tex_destroy(gpu, &global);
     pl_tex_destroy(gpu, &dummy);
     pl_tex_destroy(gpu, &still);
     width = height = levels = 0;
@@ -542,6 +607,7 @@ bool FlowInterpolator::Impl::ensureSize(int w, int h)
             return false;
     }
     stats = makeTex(1, 1);
+    global = makeTex(1, 1);
     dummy = makeTex(1, 1);
     still = makeTex(std::max(1, (w + 1) / 2), std::max(1, (h + 1) / 2));
     if (!still)
@@ -855,6 +921,29 @@ bool FlowInterpolator::interpolate(pl_tex prev, pl_tex cur, pl_tex const *output
             return false;
     }
     return true;
+}
+
+bool FlowInterpolator::pseudoDepth(pl_tex prev, pl_tex cur, pl_tex out, float t, float near_depth, float far_depth)
+{
+    Impl &d = *impl;
+    if (!out || !prev || prev != d.analyzed_prev || cur != d.analyzed_cur || !d.global)
+        return false;
+    if (out->params.w != d.width || out->params.h != d.height)
+        return false;
+    const size_t last = static_cast<size_t>(d.levels - 1);
+    const float coarse_size[2] = { static_cast<float>(d.lw[last]), static_cast<float>(d.lh[last]) };
+    if (!d.run("flow dominant motion", nullptr, kGlobalBody,
+               { sampledDesc("fgCoarse", d.flow[last], false), storageDesc("fgDst", d.global) },
+               { vec2Var("fgSize", coarse_size) }, 1, 1, 1))
+        return false;
+    const float full[2] = { static_cast<float>(d.width), static_cast<float>(d.height) };
+    const float flow_size[2] = { static_cast<float>(d.lw[0]), static_cast<float>(d.lh[0]) };
+    return d.run("flow depth", nullptr, kDepthBody,
+                 { sampledDesc("fgFlow", d.final_flow[static_cast<size_t>(d.final_index)]),
+                   sampledDesc("fgGlobal", d.global, false), storageDesc("fgOutImg", out) },
+                 { vec2Var("fgSize", full), vec2Var("fgFlowSize", flow_size), floatVar("fgT", &t),
+                   floatVar("fgNear", &near_depth), floatVar("fgFar", &far_depth) },
+                 d.width, d.height, 16);
 }
 
 bool FlowInterpolator::motionVectors(pl_tex prev, pl_tex cur, pl_tex out, bool *written,
