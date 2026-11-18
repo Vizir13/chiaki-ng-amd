@@ -1,6 +1,7 @@
 #include "qmlmainwindow.h"
 #include "rtxvsr.h"
 #include "framegen.h"
+#include "vkreflex.h"
 #include "qmlbackend.h"
 #include "qmlsvgprovider.h"
 #include "chiaki/log.h"
@@ -940,6 +941,15 @@ static qint64 snapPresentToVblank(qint64 target_us, double refresh_rate)
     static double prev_shift_us = 0.0;
     const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
     const double display_period_us = 1000000.0 / refresh_rate;
+    // A present that reached the screen is a vblank of the window's own
+    // display (present wait): better than DWM's.
+    qint64 shown_us = 0;
+    if (VkReflex::lastDisplayTime(&shown_us, 1000000)) {
+        vblank_us = shown_us;
+        period_us = display_period_us;
+        good_sample_us = now_us;
+        queried_us = now_us;
+    }
     if (now_us - queried_us > 100000) {
         queried_us = now_us;
         DWM_TIMING_INFO info = {};
@@ -3012,6 +3022,7 @@ QmlMainWindow::~QmlMainWindow()
     pl_mpv_user_shader_destroy(&fsrcnnx_hook_16);
     pl_mpv_user_shader_destroy(&rcas_hook);
     if (render_backend == RenderBackend::Vulkan) {
+        VkReflex::onDeviceDestroyed();
         pl_vulkan_destroy(&placebo_vulkan);
         pl_vk_inst_destroy(&placebo_vk_inst);
     } else {
@@ -5245,6 +5256,7 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
         qCWarning(chiakiGui) << "Vulkan renderer initialization failed, falling back to OpenGL:" << reason;
         pending_renderer_fallback_reason = reason;
 
+        VkReflex::onDeviceDestroyed();
         if (placebo_vulkan)
             pl_vulkan_destroy(&placebo_vulkan);
         if (placebo_vk_inst)
@@ -5301,6 +5313,8 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
         // NGX (RTX Video Super Resolution) extensions are optional; without
         // them VSR initialization fails and libplacebo scaling is used.
         RtxVsr::appendRequiredExtensions(opt_extensions, opt_dev_extensions);
+        // NVIDIA Reflex and display timing of the presents (vkreflex.h).
+        VkReflex::appendDeviceExtensions(opt_dev_extensions);
 
         struct pl_vk_inst_params vk_inst_params = {
             .extensions = vk_exts,
@@ -5338,17 +5352,20 @@ void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
 
         struct pl_vulkan_params vulkan_params = {
             .instance = placebo_vk_inst->instance,
-            .get_proc_addr = placebo_vk_inst->get_proc_addr,
+            // Wraps the swapchain / present / submit calls for Reflex.
+            .get_proc_addr = VkReflex::wrapInstanceProcAddr(placebo_vk_inst->get_proc_addr),
             .allow_software = true,
             PL_VULKAN_DEFAULTS
             .extra_queues = VK_QUEUE_VIDEO_DECODE_BIT_KHR,
             .opt_extensions = opt_dev_extensions.data(),
             .num_opt_extensions = static_cast<int>(opt_dev_extensions.size()),
+            .features = VkReflex::deviceFeatures(),
         };
         placebo_vulkan = pl_vulkan_create(placebo_log, &vulkan_params);
         if (!placebo_vulkan) {
             fallbackToOpenGL(QStringLiteral("Failed to create Vulkan device"));
         } else {
+        VkReflex::onDeviceCreated(placebo_vulkan);
 
 #define GET_PROC(name_) { \
     vk_funcs.name_ = reinterpret_cast<decltype(vk_funcs.name_)>( \
@@ -7182,6 +7199,7 @@ void QmlMainWindow::render()
     double refresh_rate = screen() ? screen()->refreshRate() : 60.0;
     if (refresh_rate <= 1.0)
         refresh_rate = 60.0;
+    VkReflex::setRefreshRate(refresh_rate);
     const double refresh_interval_s = 1.0 / refresh_rate;
     const double stream_interval_s = stream_configured_frame_interval_ms > 0.0
         ? stream_configured_frame_interval_ms / 1000.0
@@ -7308,6 +7326,12 @@ void QmlMainWindow::render()
             if (fg_drop_log_us && fg_dropped_count + fg_shown_count > 0)
                 qCInfo(chiakiGui).nospace() << "[framegen] Present path in the last "
                     << (now_us - fg_drop_log_us) / 1000 << " ms (avg/max ms): " << present_path;
+            // What reached the screen (present wait): at 60 fps on 180 Hz
+            // every frame should stay 3 refreshes.
+            const QString display_stats = VkReflex::takeDisplayStats();
+            if (fg_drop_log_us && !display_stats.isEmpty())
+                qCInfo(chiakiGui).nospace() << "[framegen] On screen in the last "
+                    << (now_us - fg_drop_log_us) / 1000 << " ms (avg/max): " << display_stats;
             if (fg_dropped_count > 0)
                 qCInfo(chiakiGui).nospace() << "[framegen] Generated frames in the last "
                     << (fg_drop_log_us ? (now_us - fg_drop_log_us) / 1000 : 0) << " ms: " << fg_shown_count
@@ -8528,6 +8552,7 @@ void QmlMainWindow::render()
         logLatencyStats("render_prep", render_call_begin_us - render_entry_us_local);
     if (render_call_begin_us >= render_setup_begin_us)
         logRenderSetupStats(render_call_begin_us, render_call_begin_us - render_setup_begin_us);
+    VkReflex::markFrameStart();
     const bool placebo_rendered = bypass_frame_queue
         ? pl_render_image(placebo_renderer, &direct_render_frame, &target_frame, &params)
         : pl_render_image_mix(placebo_renderer, render_frame_mix, &target_frame, &params);
@@ -8551,6 +8576,7 @@ void QmlMainWindow::render()
     }
     if (render_gpu_ns)
         fg_time_render_gpu.add(static_cast<qint64>(render_gpu_ns / 1000));
+    VkReflex::markRenderSubmitted();
     close_started_frame(true);
 
     if (startup_video_visible_refresh_pending.loadAcquire() != 0) {

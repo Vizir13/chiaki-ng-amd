@@ -54,6 +54,8 @@ set(SOURCE_FILES
 	src/qmlsvgprovider.cpp
 	include/vkguard.h
 	src/vkguard.c
+	include/vkreflex.h
+	src/vkreflex.cpp
 	include/ngxcore.h
 	src/ngxcore.cpp
 	include/rtxvsr.h
