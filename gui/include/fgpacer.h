@@ -65,15 +65,15 @@ public:
     // into `targets_us` (count entries) and returns the first one.
     int64_t schedule(int64_t now_us, int64_t nominal_period, int count, int64_t extra_lead_us, int64_t *targets_us)
     {
-        count = std::max(count, 1);
-        extra_lead_us = std::max<int64_t>(extra_lead_us, 0);
+        count = (std::max)(count, 1);
+        extra_lead_us = (std::max)(extra_lead_us, int64_t(0));
         if (nominal_period != nominal_period_us) {
             nominal_period_us = nominal_period;
             period_est_us = static_cast<double>(nominal_period_us);
             next_start_us = 0;
             last_arrival_us = 0;
         }
-        const double nominal = static_cast<double>(std::max<int64_t>(nominal_period_us, 1));
+        const double nominal = static_cast<double>((std::max)(nominal_period_us, int64_t(1)));
 
         // Track the real picture rate from arrival intervals; gaps (lost
         // pictures, stalls) and bursts do not belong to the rate.
@@ -106,7 +106,7 @@ public:
             stable_batches = 0;
             excess_avg_us = 0.0;
             if (batches - last_late_batch <= cfg.late_window_batches)
-                buffer_us = std::min(buffer_us + cfg.grow_us, cfg.max_buffer_us);
+                buffer_us = (std::min)(buffer_us + cfg.grow_us, cfg.max_buffer_us);
             last_late_batch = batches;
         } else {
             // Steer the margin between arrival and slot towards the buffer by
@@ -120,7 +120,7 @@ public:
             start = next_start_us - static_cast<int64_t>(std::clamp(excess_avg_us, -max_step, max_step));
             if (++stable_batches >= cfg.stable_batches_to_shrink) {
                 stable_batches = 0;
-                buffer_us = std::max(buffer_us - cfg.shrink_us, cfg.min_buffer_us);
+                buffer_us = (std::max)(buffer_us - cfg.shrink_us, cfg.min_buffer_us);
             }
         }
 
