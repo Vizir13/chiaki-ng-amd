@@ -8351,14 +8351,25 @@ void QmlMainWindow::render()
                     fg_new_count == 2) {
                     const double make_ms = (vsr_applied && rtx_vsr ? rtx_vsr->gpuTimeMs() : 0.0f) +
                                            frame_gen->gpuTimeMs();
+                    // Plus how late stream frames come against the clock: the
+                    // 90th percentile of the last ~4 s (3 ms flat let frames
+                    // 16-22 ms late through as a skipped beat).
+                    qint64 late_p90_us = 3000;
+                    if (fg_late_history.size() >= 30) {
+                        std::vector<qint64> sorted(fg_late_history);
+                        const size_t k = sorted.size() * 9 / 10;
+                        std::nth_element(sorted.begin(), sorted.begin() + k, sorted.end());
+                        late_p90_us = qMax<qint64>(2000, sorted[k] + 1000);
+                    }
                     const qint64 needed_us = qBound<qint64>(jitter_floor_us,
-                        static_cast<qint64>(make_ms * 1000.0) + 3000, period_us * 3 / 4);
+                        static_cast<qint64>(make_ms * 1000.0) + late_p90_us, period_us * 9 / 10);
                     // Moving the delay moves every present once: only on a
                     // real change.
                     if (fg_jitter_delay_us == 0 || qAbs(needed_us - fg_jitter_delay_us) > 2000) {
                         if (fg_jitter_delay_us != 0 || needed_us != jitter_floor_us)
                             qCInfo(chiakiGui).nospace() << "[framegen] Jitter buffer delay " << needed_us / 1000.0
-                                << " ms (VSR + generation GPU " << make_ms << " ms)";
+                                << " ms (VSR + generation GPU " << make_ms << " ms, late arrivals p90 "
+                                << late_p90_us / 1000.0 << " ms)";
                         fg_jitter_delay_us = needed_us;
                     }
                     const qint64 jitter_us = fg_jitter_delay_us;
@@ -8382,6 +8393,11 @@ void QmlMainWindow::render()
                         fg_arrival_est_us = direct_frame_arrival_us;
                     } else {
                         fg_time_arrival_jitter.add(qAbs(error_us));
+                        const qint64 late_us = qMax<qint64>(0, error_us);
+                        if (fg_late_history.size() < 120)
+                            fg_late_history.push_back(late_us);
+                        else
+                            fg_late_history[fg_late_index++ % 120] = late_us;
                         // Single late or early frames barely move the clock.
                         fg_arrival_est_us = predicted_us + error_us / 10;
                     }

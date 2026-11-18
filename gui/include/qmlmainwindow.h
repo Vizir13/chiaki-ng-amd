@@ -431,6 +431,9 @@ private:
     std::vector<qint64> fg_carry_targets;
     // Jitter buffer delay in use (follows the VSR + generation GPU time).
     qint64 fg_jitter_delay_us = 0;
+    // How late the last stream frames came against the arrival clock.
+    std::vector<qint64> fg_late_history;
+    size_t fg_late_index = 0;
     // FrameGen::texturesGeneration() the pending / carried frames belong to.
     uint64_t fg_frames_generation = 0;
     int fg_active_multiplier = 1;
