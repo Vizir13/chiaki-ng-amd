@@ -300,6 +300,11 @@ private:
     bool bypass_frame_queue = true;
     QMutex direct_frame_mutex;
     AVFrame *direct_pending_frame = nullptr;
+    // When direct_pending_frame arrived from the decoder (us), and the
+    // arrival of the stream frame whose generated frames are pending.
+    qint64 direct_pending_arrival_us = 0;
+    qint64 direct_frame_arrival_us = 0;
+    qint64 fg_pending_arrival_us = 0;
     struct pl_frame direct_frame = {};
     QAtomicInteger<int> direct_frame_reset = 0;
     uint64_t ts_start = 0;

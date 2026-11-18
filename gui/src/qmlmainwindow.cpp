@@ -886,6 +886,11 @@ static PresentPathTiming fg_time_fg_cpu;        // CPU time of FrameGen::process
 static PresentPathTiming fg_time_placebo_cpu;   // CPU time of pl_render_image
 static std::atomic<qint64> fg_present_done_us{0};
 static std::atomic<qint64> fg_blocked_renders{0}; // renders skipped while a present was in flight
+// Stream frames much smaller than the last new picture while every picture is
+// expected to be new: the console repeated the picture (the game missed a
+// frame), which frame generation then interpolates as no motion.
+static std::atomic<qint64> fg_repeat_frames{0};
+static PresentPathTiming fg_time_video_latency; // decoded stream frame -> its real frame rendered
 
 static void logSwapInterval(qint64 now_us)
 {
@@ -3223,8 +3228,12 @@ void QmlMainWindow::presentFrame(ChiakiFfmpegFrame frame, int32_t frames_lost, q
     stream_frames_current.fetchAndAddRelaxed(1);
 
     if (bypass_frame_queue) {
+        const size_t last_new_size = repeat_detector.newPictureSize();
         const bool repeat = repeat_detector.feed(frame.packet_size);
         const int cadence = repeat_detector.cadence();
+        if (cadence == 1 && frame.packet_size && last_new_size &&
+            static_cast<double>(frame.packet_size) < static_cast<double>(last_new_size) * 0.3)
+            fg_repeat_frames.fetch_add(1, std::memory_order_relaxed);
         if (fg_source_cadence.fetchAndStoreRelaxed(cadence) != cadence) {
             qCInfo(chiakiGui).nospace() << "Source cadence: "
                 << (cadence == 2 ? "every picture repeated (e.g. 30 fps game in a 60 fps stream)"
@@ -3244,6 +3253,7 @@ void QmlMainWindow::presentFrame(ChiakiFfmpegFrame frame, int32_t frames_lost, q
                 dropped_frames_current.fetchAndAddRelaxed(1);
             }
             direct_pending_frame = frame.frame;
+            direct_pending_arrival_us = present_entry_us;
         }
         if (!startup_warmup_frame_active)
             startup_first_real_frame_queued_pending_visibility.storeRelease(1);
@@ -7105,6 +7115,9 @@ void QmlMainWindow::render()
         } else {
             fg_override_frame = fg_pending_frames.front();
             fg_pending_frames.erase(fg_pending_frames.begin());
+            // The last one is the stream frame's real frame.
+            if (fg_pending_frames.empty() && fg_pending_arrival_us > 0)
+                fg_time_video_latency.add(static_cast<qint64>(chiaki_time_now_monotonic_us()) - fg_pending_arrival_us);
             if (!fg_pending_frames.empty())
                 fg_shown_count++;
             fg_override = true;
@@ -7126,13 +7139,16 @@ void QmlMainWindow::render()
             const QString present_path = QStringLiteral(
                 "acquire %1, render %2, pacing %3, submit %4, swap %5, present->next render %6, renders skipped while presenting %7"
                 "; GPU: final render %8 per present, RTX VSR %9 per stream frame"
-                "; CPU: VSR %10, frame generation %11, pl_render_image %12")
+                "; CPU: VSR %10, frame generation %11, pl_render_image %12"
+                "; stream frame -> its real frame rendered %13; repeated pictures %14")
                 .arg(fg_time_start_frame.take(), fg_time_render_work.take(), fg_time_pace.take(),
                      fg_time_submit.take(), fg_time_swap.take(), fg_time_handoff.take())
                 .arg(fg_blocked_renders.exchange(0))
                 .arg(fg_time_render_gpu.take())
                 .arg(rtx_vsr ? rtx_vsr->gpuTimeMs() : 0.0f, 0, 'f', 2)
-                .arg(fg_time_vsr_cpu.take(), fg_time_fg_cpu.take(), fg_time_placebo_cpu.take());
+                .arg(fg_time_vsr_cpu.take(), fg_time_fg_cpu.take(), fg_time_placebo_cpu.take())
+                .arg(fg_time_video_latency.take())
+                .arg(fg_repeat_frames.exchange(0));
             if (fg_drop_log_us && fg_dropped_count + fg_shown_count > 0)
                 qCInfo(chiakiGui).nospace() << "[framegen] Present path in the last "
                     << (now_us - fg_drop_log_us) / 1000 << " ms (avg/max ms): " << present_path;
@@ -7166,6 +7182,8 @@ void QmlMainWindow::render()
         {
             QMutexLocker locker(&direct_frame_mutex);
             std::swap(incoming, direct_pending_frame);
+            if (incoming)
+                direct_frame_arrival_us = direct_pending_arrival_us;
             reset_direct_frame = direct_frame_reset.fetchAndStoreRelaxed(0) != 0;
         }
         if (reset_direct_frame && frame_gen)
@@ -8143,6 +8161,7 @@ void QmlMainWindow::render()
                 }
                 direct_render_frame = fg_outputs.front();
                 fg_pending_frames.assign(fg_outputs.begin() + 1, fg_outputs.end());
+                fg_pending_arrival_us = direct_frame_arrival_us;
                 if (fg_active_multiplier != multiplier || fg_active_cadence != cadence)
                     qCInfo(chiakiGui).nospace() << "Frame generation active: " << FrameGen::backendName(backend_choice)
                                       << " " << multiplier << "x"
