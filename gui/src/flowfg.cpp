@@ -376,7 +376,7 @@ if (st.x <= 0.12 && st.y <= 0.45) {
     }
     flow_pick(c, vec2(0.0), vb, inv, a, b, err, bv);
 }
-imageStore(fgOutImg, p, vec4(-bv, 0.0, 0.0));
+imageStore(fgOutImg, p, vec4(-bv * fgScale, 0.0, 0.0));
 )GLSL";
 
 struct pl_shader_desc sampledDesc(const char *name, pl_tex tex, bool linear = true)
@@ -453,6 +453,9 @@ struct FlowInterpolator::Impl
     // Time the motion is measured at: 0.5 (in-between frame) for synthesis,
     // 1 (current frame) for motion vectors.
     float anchor = 0.5f;
+    // Frames of the last completed motion search (for reuse_analysis).
+    pl_tex analyzed_prev = nullptr;
+    pl_tex analyzed_cur = nullptr;
     pl_tex stats = nullptr;
     // Bound where a pass needs no input (every descriptor of a pass must be
     // a distinct texture).
@@ -724,6 +727,7 @@ bool FlowInterpolator::analyze(pl_tex prev, pl_tex cur, float anchor, bool &anal
     Impl &d = *impl;
     if (!d.dp || !cur)
         return false;
+    d.analyzed_prev = d.analyzed_cur = nullptr;
     d.collectTimers();
     if (!d.ensureSize(cur->params.w, cur->params.h))
         return false;
@@ -817,6 +821,8 @@ bool FlowInterpolator::analyze(pl_tex prev, pl_tex cur, float anchor, bool &anal
     }
     d.final_index = next_final;
     d.have_temporal = true;
+    d.analyzed_prev = prev;
+    d.analyzed_cur = cur;
     analyzed = true;
     return true;
 }
@@ -851,15 +857,20 @@ bool FlowInterpolator::interpolate(pl_tex prev, pl_tex cur, pl_tex const *output
     return true;
 }
 
-bool FlowInterpolator::motionVectors(pl_tex prev, pl_tex cur, pl_tex out, bool *written)
+bool FlowInterpolator::motionVectors(pl_tex prev, pl_tex cur, pl_tex out, bool *written,
+                                     float scale, bool reuse_analysis)
 {
     *written = false;
     bool analyzed = false;
-    if (!out || !analyze(prev, cur, 1.0f, analyzed))
+    if (!out)
+        return false;
+    Impl &d = *impl;
+    if (reuse_analysis && prev && prev == d.analyzed_prev && cur == d.analyzed_cur && d.anchor == 1.0f)
+        analyzed = true;
+    else if (!analyze(prev, cur, 1.0f, analyzed))
         return false;
     if (!analyzed)
         return true;
-    Impl &d = *impl;
     if (out->params.w != d.width || out->params.h != d.height)
         return false;
     const float full[2] = { static_cast<float>(d.width), static_cast<float>(d.height) };
@@ -873,7 +884,7 @@ bool FlowInterpolator::motionVectors(pl_tex prev, pl_tex cur, pl_tex out, bool *
                  sampledDesc("fgFlow", d.final_flow[static_cast<size_t>(d.final_index)]),
                  sampledDesc("fgStats", d.stats, false), storageDesc("fgOutImg", out) },
                { vec2Var("fgSize", full), vec2Var("fgFlowSize", flow_size), floatVar("fgT", &t),
-                 floatVar("fgReach", &reach), floatVar("fgReachFar", &reach_far) },
+                 floatVar("fgReach", &reach), floatVar("fgReachFar", &reach_far), floatVar("fgScale", &scale) },
                d.width, d.height, 16))
         return false;
     *written = true;

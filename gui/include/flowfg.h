@@ -42,8 +42,12 @@ public:
     // `cur`, the displacement to the same content in `prev` in pixels into the
     // storable two-channel float texture `out` (same size as `cur`). With
     // `prev` null only the analysis of `cur` is prepared and `written` stays
-    // false.
-    bool motionVectors(pl_tex prev, pl_tex cur, pl_tex out, bool *written);
+    // false. The vectors are multiplied by `scale`. With `reuse_analysis`,
+    // the motion search of the last call is reused when it was made for the
+    // same `prev` and `cur` (the caller makes sure their contents did not
+    // change since); only the cheap vector pass then runs.
+    bool motionVectors(pl_tex prev, pl_tex cur, pl_tex out, bool *written,
+                       float scale = 1.0f, bool reuse_analysis = false);
 
     // Drops all size dependent state.
     void invalidate();
