@@ -12,6 +12,12 @@
     <file>RegistDialog.qml</file>
     <file>SteamShortcutDialog.qml</file>
     <file>SettingsDialog.qml</file>
+    <file>SettingsPicturePage.qml</file>
+    <file>SettingsSmoothnessPage.qml</file>
+    <file>SettingsStreamPage.qml</file>
+    <file>SettingsControlsPage.qml</file>
+    <file>SettingsAudioPage.qml</file>
+    <file>SettingsAdvancedPage.qml</file>
     <file>DisplaySettingsDialog.qml</file>
     <file>EnhancementSettingsDialog.qml</file>
     <file>PlaceboSettingsDialog.qml</file>
@@ -37,6 +43,7 @@
     <file>controls/SettingRow.qml</file>
     <file>controls/NavItem.qml</file>
     <file>controls/Chip.qml</file>
+    <file>controls/SettingsPage.qml</file>
     <file>controls/Presets.js</file>
   </qresource>
 </RCC>

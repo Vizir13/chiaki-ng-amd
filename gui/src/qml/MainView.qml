@@ -185,7 +185,7 @@ Pane {
     Keys.onNoPressed: deleteHost(selectedIndex)
     Keys.onEscapePressed: root.showConfirmDialog(qsTr("Quit"), qsTr("Are you sure you want to quit?"), () => Qt.quit())
     Keys.onPressed: (event) => {
-        if (event.modifiers)
+        if (event.modifiers & ~Qt.KeypadModifier)
             return;
         switch (event.key) {
         case Qt.Key_PageUp:

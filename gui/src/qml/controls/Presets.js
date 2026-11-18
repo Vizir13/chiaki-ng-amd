@@ -54,10 +54,16 @@ function list(s) {
     ];
 }
 
+// Any RTX Video mode counts as "upscaling on": the user's own choice of
+// mode (Upscale Ultra, Streaming, ...) is kept.
 function matches(s, values) {
     for (const key in values) {
-        if (s[key] !== values[key])
+        if (key === "rtxVsrQuality") {
+            if ((s.rtxVsrQuality > 0) !== (values.rtxVsrQuality > 0))
+                return false;
+        } else if (s[key] !== values[key]) {
             return false;
+        }
     }
     return true;
 }
@@ -94,8 +100,11 @@ function needsRestart(s, values) {
 }
 
 function apply(s, values) {
-    for (const key in values)
+    for (const key in values) {
+        if (key === "rtxVsrQuality" && values[key] > 0 && s.rtxVsrQuality > 0)
+            continue;
         s[key] = values[key];
+    }
 }
 
 // Frames shown per stream frame with the current settings
