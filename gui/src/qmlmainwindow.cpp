@@ -5865,15 +5865,31 @@ bool QmlMainWindow::throttleFramePresentation(double interval_s)
     const uint64_t interval_us = static_cast<uint64_t>(interval_s * 1000000.0 + 0.5);
     if (!interval_us)
         return true;
-    if (qAbs(last_throttle_interval_s - interval_s) > 1e-6)
+    // Frame generation presents several frames per stream frame, and the GPU
+    // work behind them (e.g. NVIDIA VFG) makes some presents late. Moving a
+    // late present to the following slot, or restarting the slots when the
+    // backpressure factor (0.8-1.0) changes the interval, lost a whole
+    // interval each time and generated frames ran past the next stream frame.
+    // There a late present goes out right away and the following ones catch
+    // up on the same slots; they restart only when more than an interval
+    // behind or when the interval really changes (another multiplier).
+    const bool frame_gen_pacing = fg_active_multiplier > 1;
+    if (frame_gen_pacing
+            ? qAbs(last_throttle_interval_s - interval_s) > interval_s * 0.25
+            : qAbs(last_throttle_interval_s - interval_s) > 1e-6)
         next_frame_target_us = 0;
     last_throttle_interval_s = interval_s;
 
     const uint64_t now_us = chiaki_time_now_monotonic_us();
     if (!next_frame_target_us)
         next_frame_target_us = now_us + interval_us;
-    while (next_frame_target_us <= now_us)
-        next_frame_target_us += interval_us;
+    if (frame_gen_pacing) {
+        if (next_frame_target_us + interval_us <= now_us)
+            next_frame_target_us = now_us;
+    } else {
+        while (next_frame_target_us <= now_us)
+            next_frame_target_us += interval_us;
+    }
     const qint64 swap_to_start_gap_estimate_us = this->swap_to_start_gap_estimate_us.loadAcquire();
     const qint64 start_frame_block_estimate_us = this->start_frame_block_estimate_us.loadAcquire();
     const qint64 render_submit_estimate_us = this->render_submit_estimate_us.loadAcquire();
@@ -6280,9 +6296,10 @@ void QmlMainWindow::createSwapchain()
     // With depth 1 every swap waits for the previous frame to finish on the
     // GPU. Frame generation shares the GPU with long CUDA work (NVIDIA VFG
     // High runs ~11 ms), so that wait delayed the next presents past the next
-    // stream frame and generated frames were dropped. One more frame in
-    // flight keeps the renders going while the GPU is busy.
-    int swapchain_depth = settings->GetFrameGenBackend() > 0 ? 2 : 1;
+    // stream frame and generated frames were dropped. More frames in flight
+    // keep the renders going while the GPU is busy (VFG + DLSS FG 4x of a
+    // 30 fps stream: ~49 fps shown with depth 1, ~90 with 2, ~102 with 3).
+    int swapchain_depth = settings->GetFrameGenBackend() > 0 ? 3 : 1;
     const int swapchain_depth_override = qEnvironmentVariableIntValue("CHIAKI_SWAPCHAIN_DEPTH");
     if (swapchain_depth_override >= 1 && swapchain_depth_override <= 4)
         swapchain_depth = swapchain_depth_override;
