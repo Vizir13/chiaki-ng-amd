@@ -89,7 +89,10 @@ float flow_score(vec2 c, vec2 v, vec2 pred)
 {
     float dev = min(length(v - pred), 8.0);
     float still = dot(v, v) > 0.0 ? 0.004 : 0.0;
-    return flow_cost(c, v) + 0.003 * dev + still;
+    // Smoothness weight tuned with chiaki-fgbench: 0.003 let flat, textureless
+    // blocks pick arbitrary vectors that later tear object edges apart
+    // (+1.4 dB at 2x, +2.1 dB at 4x on a foliage scene, fewer broken frames).
+    return flow_cost(c, v) + 0.020 * dev + still;
 }
 
 void flow_try(vec2 c, vec2 v, vec2 pred, inout vec2 best, inout float best_score)
@@ -133,9 +136,10 @@ flow_try(c, vec2(0.0), pred, best, best_score);
 if (fgHasTemporal > 0.5)
     flow_try(c, textureLod(fgTemporal, c / fgSize, 0.0).xy / fgToFull, pred, best, best_score);
 
-// Local refinement down to half a texel.
-for (int k = 0; k < 2; k++) {
-    float stride = k == 0 ? 1.0 : 0.5;
+// Local refinement down to a quarter texel (one display pixel at 1/4 scale):
+// coarser steps leave fine detail swimming by a pixel or two.
+for (int k = 0; k < 3; k++) {
+    float stride = k == 0 ? 1.0 : (k == 1 ? 0.5 : 0.25);
     vec2 centre = best;
     for (int j = -1; j <= 1; j++)
         for (int i = -1; i <= 1; i++)
@@ -266,8 +270,18 @@ if (st.x > 0.12 || st.y > 0.45) {
     // Scene cut: no motion to follow, repeat the nearer frame.
     res = fgT < 0.5 ? texelFetch(fgPrevC, p, 0).rgb : texelFetch(fgCurC, p, 0).rgb;
 } else {
-    vec2 fc = c * (fgFlowSize / fgSize);
-    vec2 vb = textureLod(fgFlow, fc / fgFlowSize, 0.0).xy;
+    // The motion field is measured at the halfway time. A pixel of the frame
+    // at time t lies on the trajectory that crosses the halfway frame at
+    // c + (0.5 - t) v: look the motion up there (two fixed-point steps), so
+    // for t != 0.5 (3x/4x) object edges do not take their neighbours' motion.
+    vec2 fs = fgFlowSize / fgSize;
+    vec2 cq = c;
+    vec2 vb = textureLod(fgFlow, cq * fs / fgFlowSize, 0.0).xy;
+    for (int it = 0; it < 2; it++) {
+        cq = c + (0.5 - fgT) * vb;
+        vb = textureLod(fgFlow, cq * fs / fgFlowSize, 0.0).xy;
+    }
+    vec2 fc = cq * fs;
     vec3 a = vec3(0.0);
     vec3 b = vec3(0.0);
     float err = 1e9;
@@ -763,6 +777,9 @@ bool FlowInterpolator::analyze(pl_tex prev, pl_tex cur, float anchor, bool &anal
         // Motion beyond ~30% of the frame per stream frame is not tracked.
         const float max_flow = 0.3f * size[0];
         const float has_coarse = coarsest ? 0.0f : 1.0f;
+        // The previous picture's motion seeds the finest level only: on the
+        // coarse levels it was measured worse than the coarse search alone
+        // (chiaki-fgbench, foliage scene: -1 dB).
         const float has_temporal = (l == 0 && d.have_temporal) ? 1.0f : 0.0f;
         const int radius = kCoarseRadius;
         // The matching patch keeps covering ~10 display pixels when the
