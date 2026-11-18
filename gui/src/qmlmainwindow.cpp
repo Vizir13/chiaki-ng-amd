@@ -880,6 +880,7 @@ static PresentPathTiming fg_time_pace;          // present pacing wait
 static PresentPathTiming fg_time_submit;        // pl_swapchain_submit_frame
 static PresentPathTiming fg_time_swap;          // pl_swapchain_swap_buffers
 static PresentPathTiming fg_time_handoff;       // present done -> next render that does work
+static PresentPathTiming fg_time_render_gpu;    // GPU time of the final render (sum of its passes)
 static std::atomic<qint64> fg_present_done_us{0};
 static std::atomic<qint64> fg_blocked_renders{0}; // renders skipped while a present was in flight
 
@@ -7111,10 +7112,13 @@ void QmlMainWindow::render()
         if (now_us - fg_drop_log_us >= 5000000) {
             // Where the time between presents goes (avg/max ms).
             const QString present_path = QStringLiteral(
-                "acquire %1, render %2, pacing %3, submit %4, swap %5, present->next render %6, renders skipped while presenting %7")
+                "acquire %1, render %2, pacing %3, submit %4, swap %5, present->next render %6, renders skipped while presenting %7"
+                "; GPU: final render %8 per present, RTX VSR %9 per stream frame")
                 .arg(fg_time_start_frame.take(), fg_time_render_work.take(), fg_time_pace.take(),
                      fg_time_submit.take(), fg_time_swap.take(), fg_time_handoff.take())
-                .arg(fg_blocked_renders.exchange(0));
+                .arg(fg_blocked_renders.exchange(0))
+                .arg(fg_time_render_gpu.take())
+                .arg(rtx_vsr ? rtx_vsr->gpuTimeMs() : 0.0f, 0, 'f', 2);
             if (fg_drop_log_us && fg_dropped_count + fg_shown_count > 0)
                 qCInfo(chiakiGui).nospace() << "[framegen] Present path in the last "
                     << (now_us - fg_drop_log_us) / 1000 << " ms (avg/max ms): " << present_path;
@@ -8168,6 +8172,15 @@ void QmlMainWindow::render()
         startup_video_visible_pending.storeRelease(1);
     }
 
+    // GPU time of this render, as libplacebo last measured each of its passes.
+    uint64_t render_gpu_ns = 0;
+    if (fg_active_multiplier > 1) {
+        params.info_callback = [](void *priv, const struct pl_render_info *info) {
+            if (info && info->pass)
+                *static_cast<uint64_t *>(priv) += info->pass->last;
+        };
+        params.info_priv = &render_gpu_ns;
+    }
     const qint64 render_call_begin_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
     if (render_entry_us_local > 0 && render_call_begin_us >= render_entry_us_local)
         logLatencyStats("render_prep", render_call_begin_us - render_entry_us_local);
@@ -8191,6 +8204,8 @@ void QmlMainWindow::render()
                 logLatencyStats("render_work", render_after_us - render_entry_us_local);
         }
     }
+    if (render_gpu_ns)
+        fg_time_render_gpu.add(static_cast<qint64>(render_gpu_ns / 1000));
     close_started_frame(true);
 
     if (startup_video_visible_refresh_pending.loadAcquire() != 0) {

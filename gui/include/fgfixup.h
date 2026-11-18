@@ -4,6 +4,7 @@
 #include <libplacebo/gpu.h>
 #include <libplacebo/log.h>
 
+#include <cstdint>
 #include <memory>
 
 // Clean-up passes run on the frames a frame generation backend produced,
@@ -44,6 +45,9 @@ public:
     bool after(pl_tex prev, pl_tex cur, pl_tex motion, pl_tex generated, float t, bool detail, bool statics);
 
     void invalidate();
+
+    // GPU time of the passes whose results came in since the last call (ns).
+    uint64_t takeGpuNs();
 
 private:
     struct Impl;

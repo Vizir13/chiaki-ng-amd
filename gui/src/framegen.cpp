@@ -177,6 +177,12 @@ struct FrameGen::Impl
     double stat_chain_ms = 0.0;
     double stat_chain_max_ms = 0.0;
     int stat_count = 0;
+    // GPU time of the input render (sum of its passes, as libplacebo last
+    // measured them), averaged per stream frame for the log.
+    double stat_input_gpu_ms = 0.0;
+    int stat_input_gpu_count = 0;
+    // Clean-up passes, summed over the log interval (divided by stat_count).
+    double stat_fixup_gpu_ms = 0.0;
     std::unique_ptr<FgBackendImpl> chain_impl;
     bool chain_failed = false;
     bool chain_logged = false;
@@ -1302,7 +1308,24 @@ QString FrameGen::takeTimingSummary()
     if (d.stat_chain_max_ms > 0.0)
         s += QStringLiteral(", of it DLSS FG stage %1 / %2 ms")
                  .arg(d.stat_chain_ms / d.stat_count, 0, 'f', 1).arg(d.stat_chain_max_ms, 0, 'f', 1);
+    // GPU time per stream frame: the input render and the clean-up, and per
+    // call of the Flow motion search and of DLSS FG (twice per stream frame
+    // in the VFG + DLSS FG chain).
+    QStringList gpu;
+    if (d.stat_input_gpu_count)
+        gpu << QStringLiteral("input render %1").arg(d.stat_input_gpu_ms / d.stat_input_gpu_count, 0, 'f', 2);
+    if (d.motion_flow && d.motion_flow->gpuTimeMs() > 0.0f)
+        gpu << QStringLiteral("flow motion %1/call").arg(d.motion_flow->gpuTimeMs(), 0, 'f', 2);
+    if (d.timer.averageMs() > 0.0f)
+        gpu << QStringLiteral("%1 %2/call").arg(d.vfg_chain_active ? QStringLiteral("DLSS FG") : QStringLiteral("backend"))
+                   .arg(d.timer.averageMs(), 0, 'f', 2);
+    if (d.stat_fixup_gpu_ms > 0.0)
+        gpu << QStringLiteral("clean-up %1").arg(d.stat_fixup_gpu_ms / d.stat_count, 0, 'f', 2);
+    if (!gpu.isEmpty())
+        s += QStringLiteral("; GPU ms: ") + gpu.join(QStringLiteral(", "));
     d.stat_process_ms = d.stat_process_max_ms = d.stat_chain_ms = d.stat_chain_max_ms = 0.0;
+    d.stat_input_gpu_ms = d.stat_fixup_gpu_ms = 0.0;
+    d.stat_input_gpu_count = 0;
     d.stat_count = 0;
     return s;
 }
@@ -1580,6 +1603,7 @@ bool FrameGen::Impl::runSingle(FgBackendImpl *impl, FgImage &color, FgImage &out
         if (ok) {
             unsigned long seh_code = 0;
             FgImage *outputs[] = { &out };
+            timer.begin(slot.cmd, slot_index);
             {
                 // The runtimes may submit to libplacebo's queues themselves.
                 VkQueuesLock queues_lock(vk);
@@ -1587,6 +1611,7 @@ bool FrameGen::Impl::runSingle(FgBackendImpl *impl, FgImage &color, FgImage &out
                     return impl->record(*this, slot.cmd, color, outputs, 1, reset, frame_interval_ms);
                 }, &seh_code);
             }
+            timer.end(slot.cmd, slot_index);
             if (seh_code) {
                 qCCritical(chiakiGui).nospace() << "[framegen] DLSS Frame Generation (second stage) crashed inside its runtime (exception 0x"
                                                 << Qt::hex << seh_code << Qt::dec << ", in " << impl->stage() << ")";
@@ -1741,6 +1766,8 @@ bool FrameGen::process(const struct pl_frame *src, int out_w, int out_h, int mul
     d.stat_process_max_ms = std::max(d.stat_process_max_ms, total_ms);
     d.stat_chain_ms += chain_ms;
     d.stat_chain_max_ms = std::max(d.stat_chain_max_ms, chain_ms);
+    if (d.fixup)
+        d.stat_fixup_gpu_ms += d.fixup->takeGpuNs() / 1e6;
     d.stat_count++;
     return true;
 }
@@ -1822,9 +1849,19 @@ bool FrameGen::processFrames(const struct pl_frame *src, int out_w, int out_h, i
     target.color = pl_color_space_bt709;
     struct pl_render_params render_params = pl_render_default_params;
     render_params.frame_mixer = nullptr;
+    uint64_t input_gpu_ns = 0;
+    render_params.info_callback = [](void *priv, const struct pl_render_info *info) {
+        if (info && info->pass)
+            *static_cast<uint64_t *>(priv) += info->pass->last;
+    };
+    render_params.info_priv = &input_gpu_ns;
     if (!pl_render_image(d.renderer, src, &target, &render_params)) {
         qCWarning(chiakiGui) << "[framegen] Failed to prepare the frame generation input";
         return false;
+    }
+    if (input_gpu_ns) {
+        d.stat_input_gpu_ms += input_gpu_ns / 1e6;
+        d.stat_input_gpu_count++;
     }
     trace_step("input rendered");
 

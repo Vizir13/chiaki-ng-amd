@@ -7,6 +7,7 @@
 
 #include <initializer_list>
 #include <string>
+#include <vector>
 
 Q_DECLARE_LOGGING_CATEGORY(chiakiGui);
 
@@ -210,6 +211,9 @@ struct FgFixup::Impl
     int width = 0;
     int height = 0;
     bool warned = false;
+    // Ring of timers for the passes; results are read in takeGpuNs().
+    std::vector<pl_timer> timers;
+    size_t timer_cursor = 0;
 
     bool ensureSize(int w, int h);
     bool run(const char *description, const char *header, const char *body,
@@ -268,6 +272,10 @@ bool FgFixup::Impl::run(const char *description, const char *header, const char 
     compute.dispatch_size[0] = (w + kGroup - 1) / kGroup;
     compute.dispatch_size[1] = (h + kGroup - 1) / kGroup;
     compute.dispatch_size[2] = 1;
+    if (!timers.empty()) {
+        compute.timer = timers[timer_cursor];
+        timer_cursor = (timer_cursor + 1) % timers.size();
+    }
     if (!pl_dispatch_compute(dp, &compute)) {
         if (!warned)
             qCWarning(chiakiGui) << "[framegen] Clean-up shader dispatch failed:" << description;
@@ -290,6 +298,8 @@ FgFixup::~FgFixup()
     if (!d.gpu)
         return;
     pl_tex_destroy(d.gpu, &d.stable);
+    for (pl_timer &timer : d.timers)
+        pl_timer_destroy(d.gpu, &timer);
     pl_dispatch_destroy(&d.dp);
 }
 
@@ -313,7 +323,25 @@ bool FgFixup::init()
         return false;
     }
     d.dp = pl_dispatch_create(d.log, d.gpu);
+    if (d.dp) {
+        d.timers.assign(16, nullptr);
+        for (pl_timer &timer : d.timers)
+            timer = pl_timer_create(d.gpu);
+    }
     return d.dp != nullptr;
+}
+
+uint64_t FgFixup::takeGpuNs()
+{
+    uint64_t total = 0;
+    for (pl_timer timer : impl->timers) {
+        if (!timer)
+            continue;
+        uint64_t ns;
+        while ((ns = pl_timer_query(impl->gpu, timer)) != 0)
+            total += ns;
+    }
+    return total;
 }
 
 void FgFixup::invalidate()
