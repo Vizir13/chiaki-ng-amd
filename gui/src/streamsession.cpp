@@ -20,6 +20,7 @@
 #include <algorithm>
 
 #include <cstring>
+#include <memory>
 
 #define SETSU_UPDATE_INTERVAL_MS 4
 #define STEAMDECK_UPDATE_INTERVAL_MS 4

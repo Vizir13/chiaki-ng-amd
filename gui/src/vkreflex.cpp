@@ -350,7 +350,7 @@ void runJob(PresentJob &job)
     qint64 waited = 0;
     if (job.target > 0)
         waited = waitForTarget(job.target);
-    VkSwapchainPresentFenceInfoKHR fence_info = {};
+    VkSwapchainPresentFenceInfoEXT fence_info = {};
     VkPresentInfoKHR pi = {};
     pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     pi.waitSemaphoreCount = static_cast<uint32_t>(job.waits.size());
@@ -359,7 +359,7 @@ void runJob(PresentJob &job)
     pi.pSwapchains = &job.swapchain;
     pi.pImageIndices = &job.image;
     if (job.has_fence) {
-        fence_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR;
+        fence_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT;
         fence_info.swapchainCount = 1;
         fence_info.pFences = &job.fence;
         pi.pNext = &fence_info;
@@ -471,9 +471,9 @@ bool queueable(const VkPresentInfoKHR *info, bool *has_fence, VkFence *fence)
     if (info->swapchainCount != 1 || info->pResults)
         return false;
     for (auto *s = reinterpret_cast<const VkBaseInStructure *>(info->pNext); s; s = s->pNext) {
-        if (s->sType != VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR)
+        if (s->sType != VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT)
             return false;
-        auto *f = reinterpret_cast<const VkSwapchainPresentFenceInfoKHR *>(s);
+        auto *f = reinterpret_cast<const VkSwapchainPresentFenceInfoEXT *>(s);
         if (f->swapchainCount != 1 || !f->pFences)
             return false;
         *has_fence = true;
@@ -625,7 +625,7 @@ VKAPI_ATTR VkResult VKAPI_CALL wrapCreateDevice(VkPhysicalDevice phys, const VkD
     gpu_priority_high = false;
     bool has_ext = false;
     for (uint32_t i = 0; i < info->enabledExtensionCount; i++) {
-        if (std::strcmp(info->ppEnabledExtensionNames[i], VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME) == 0 ||
+        if (std::strcmp(info->ppEnabledExtensionNames[i], "VK_KHR_global_priority") == 0 ||
             std::strcmp(info->ppEnabledExtensionNames[i], VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME) == 0)
             has_ext = true;
     }
@@ -640,16 +640,16 @@ VKAPI_ATTR VkResult VKAPI_CALL wrapCreateDevice(VkPhysicalDevice phys, const VkD
         get_props(phys, &n, props.data());
         std::vector<VkDeviceQueueCreateInfo> queues(info->pQueueCreateInfos,
                                                     info->pQueueCreateInfos + info->queueCreateInfoCount);
-        std::vector<VkDeviceQueueGlobalPriorityCreateInfoKHR> prio(queues.size());
+        std::vector<VkDeviceQueueGlobalPriorityCreateInfoEXT> prio(queues.size());
         bool any = false;
         for (size_t i = 0; i < queues.size(); i++) {
             const uint32_t fam = queues[i].queueFamilyIndex;
             if (fam >= n || !(props[fam].queueFlags & VK_QUEUE_GRAPHICS_BIT))
                 continue;
             prio[i] = {};
-            prio[i].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR;
+            prio[i].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_EXT;
             prio[i].pNext = queues[i].pNext;
-            prio[i].globalPriority = VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR;
+            prio[i].globalPriority = VK_QUEUE_GLOBAL_PRIORITY_HIGH_EXT;
             queues[i].pNext = &prio[i];
             any = true;
         }
@@ -721,7 +721,9 @@ void appendDeviceExtensions(std::vector<const char *> &dev_extensions)
     if (envOff("CHIAKI_PRESENT_WAIT"))
         return;
     dev_extensions.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);
-    dev_extensions.push_back(VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME);
+    // By name: older Vulkan headers (Linux builds) lack the KHR macros; the
+    // EXT structs used with it are the same.
+    dev_extensions.push_back("VK_KHR_global_priority");
     dev_extensions.push_back(VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME);
     dev_extensions.push_back(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
     if (!envOff("CHIAKI_REFLEX"))
