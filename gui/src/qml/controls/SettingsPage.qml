@@ -11,7 +11,7 @@ Flickable {
     property string subtitle
     property Item firstFocusItem
     default property alias content: column.data
-    property int maxContentWidth: 1180
+    property int maxContentWidth: 1600
 
     clip: true
     contentWidth: width
