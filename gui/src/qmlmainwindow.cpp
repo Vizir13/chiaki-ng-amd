@@ -7498,7 +7498,8 @@ void QmlMainWindow::render()
         }
         fg_presenting_valid = false;
         if (fg_target_us > 0) {
-            const int64_t submit_lead_us = qBound<int64_t>(0, static_cast<int64_t>(g_submit_swap_est_us.load(std::memory_order_acquire)), 4000);
+            int64_t submit_lead_us = static_cast<int64_t>(g_submit_swap_est_us.load(std::memory_order_acquire));
+            submit_lead_us = submit_lead_us < 0 ? 0 : (submit_lead_us > 4000 ? 4000 : submit_lead_us);
             fgWaitUntilUs(fg_target_us - submit_lead_us, [this]() {
                 return ui_priority_update_pending.loadAcquire() != 0 || stream_session_active.loadAcquire() == 0;
             });
