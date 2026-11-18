@@ -8376,7 +8376,14 @@ void QmlMainWindow::render()
                     // it only after the need stayed well below for 5 s.
                     const qint64 now_sched_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
                     qint64 new_delay_us = fg_jitter_delay_us;
-                    if (fg_jitter_delay_us == 0 || needed_us > fg_jitter_delay_us) {
+                    // The first generations after VFG (re)starts take 30+ ms
+                    // of GPU time; following them held the delay at its cap
+                    // for 15 s at every stream start.
+                    const bool warming_up = make_ms * 1000.0 > period_us * 0.8;
+                    if (warming_up) {
+                        if (fg_jitter_delay_us == 0)
+                            new_delay_us = jitter_floor_us;
+                    } else if (fg_jitter_delay_us == 0 || needed_us > fg_jitter_delay_us) {
                         new_delay_us = qMin<qint64>(needed_us + 1500, period_us * 9 / 10);
                         fg_jitter_lower_since_us = 0;
                     } else if (needed_us + 4000 < fg_jitter_delay_us) {
