@@ -8010,7 +8010,14 @@ void QmlMainWindow::render()
         }
     }
     if (frame_mix.num_frames == 0) {
-        if (kept_frame_enqueued) {
+        // With frame generation running, a present of only the UI (overlay
+        // text, the switch to fullscreen) went out between the scheduled ones:
+        // the overlay counted 70+ fps at 2x and the next generated frame could
+        // miss its vblank. The overlay goes out with the next video present
+        // (at most a generated-frame interval later) instead.
+        const bool fg_presenting = bypass_frame_queue && fg_active_multiplier > 1 &&
+                                   stream_session_active.loadAcquire() != 0;
+        if (kept_frame_enqueued || fg_presenting) {
             close_started_frame(false);
             bool scheduled_pending = finalize_render();
             if (!scheduled_pending)
