@@ -3,6 +3,8 @@ import QtQuick.Layouts
 import QtQuick.Controls
 import QtQuick.Controls.Material
 
+import "controls" as C
+
 Item {
     id: dialog
     property alias header: headerLabel.text
@@ -57,6 +59,14 @@ Item {
             right: parent.right
         }
         height: 80
+        background: Rectangle {
+            color: C.Theme.bg
+            Rectangle {
+                anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                height: 1
+                color: C.Theme.borderSubtle
+            }
+        }
 
         RowLayout {
             anchors {
@@ -100,8 +110,10 @@ Item {
             anchors.centerIn: parent
             horizontalAlignment: Qt.AlignHCenter
             verticalAlignment: Qt.AlignVCenter
-            font.bold: true
-            font.pixelSize: 26
+            font.family: C.Theme.displayFamily
+            font.weight: Font.Bold
+            font.pixelSize: 28
+            color: C.Theme.text
         }
 
         Label {
@@ -114,8 +126,8 @@ Item {
             }
             horizontalAlignment: Qt.AlignHCenter
             verticalAlignment: Qt.AlignVCenter
-            font.bold: true
             font.pixelSize: 14
+            color: C.Theme.textSecondary
         }
     }
 

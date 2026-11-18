@@ -1,0 +1,13 @@
+singleton Theme 1.0 Theme.qml
+Button 1.0 Button.qml
+CheckBox 1.0 CheckBox.qml
+ComboBox 1.0 ComboBox.qml
+RadioButton 1.0 RadioButton.qml
+Slider 1.0 Slider.qml
+TextField 1.0 TextField.qml
+Switch 1.0 Switch.qml
+Segmented 1.0 Segmented.qml
+Card 1.0 Card.qml
+SettingRow 1.0 SettingRow.qml
+NavItem 1.0 NavItem.qml
+Chip 1.0 Chip.qml

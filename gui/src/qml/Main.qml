@@ -5,6 +5,8 @@ import QtQuick.Controls.Material
 
 import org.streetpea.chiaking
 
+import "controls" as C
+
 Item {
     id: root
     property list<Item> restoreFocusItems
@@ -12,7 +14,10 @@ Item {
     readonly property bool preferSeparateStreamSettingsWindows: Chiaki.window.runtimeRendererBackend === 1 && Chiaki.session
     property bool useSeparateStreamSettingsWindows: false
     Material.theme: Material.Dark
-    Material.accent: "#00a7ff"
+    Material.accent: C.Theme.accent
+    Material.primary: C.Theme.surface
+    Material.background: C.Theme.bg
+    Material.foreground: C.Theme.text
 
     function controllerButton(name) {
         let type = "deck";
@@ -304,6 +309,7 @@ Item {
         anchors.fill: parent
         hoverEnabled: false
         initialItem: mainViewComponent
+        font.family: C.Theme.fontFamily
         font.pixelSize: 20
 
         replaceEnter: Transition {
@@ -582,9 +588,9 @@ Item {
             RowLayout {
                 Layout.alignment: Qt.AlignCenter
 
-                Button {
+                C.Button {
                     text: qsTr("OK")
-                    Material.background: Material.accent
+                    primary: true
                     flat: true
                     leftPadding: 50
                     onClicked: infoDialog.close()

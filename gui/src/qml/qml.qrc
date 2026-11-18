@@ -29,5 +29,13 @@
     <file>controls/RadioButton.qml</file>
     <file>controls/Slider.qml</file>
     <file>controls/TextField.qml</file>
+    <file>controls/qmldir</file>
+    <file>controls/Theme.qml</file>
+    <file>controls/Switch.qml</file>
+    <file>controls/Segmented.qml</file>
+    <file>controls/Card.qml</file>
+    <file>controls/SettingRow.qml</file>
+    <file>controls/NavItem.qml</file>
+    <file>controls/Chip.qml</file>
   </qresource>
 </RCC>

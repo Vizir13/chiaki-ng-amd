@@ -58,9 +58,9 @@ Dialog {
             Layout.alignment: Qt.AlignCenter
             spacing: 20
 
-            Button {
+            C.Button {
                 text: qsTr("Yes")
-                Material.background: Material.accent
+                primary: true
                 flat: true
                 leftPadding: 50
                 onClicked: dialog.accept()
@@ -79,8 +79,7 @@ Dialog {
                 }
             }
 
-            Button {
-                Material.background: Material.accent
+            C.Button {
                 text: qsTr("No")
                 flat: true
                 leftPadding: 50
