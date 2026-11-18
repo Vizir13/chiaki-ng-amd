@@ -881,6 +881,9 @@ static PresentPathTiming fg_time_submit;        // pl_swapchain_submit_frame
 static PresentPathTiming fg_time_swap;          // pl_swapchain_swap_buffers
 static PresentPathTiming fg_time_handoff;       // present done -> next render that does work
 static PresentPathTiming fg_time_render_gpu;    // GPU time of the final render (sum of its passes)
+static PresentPathTiming fg_time_vsr_cpu;       // CPU time of RtxVsr::process in render
+static PresentPathTiming fg_time_fg_cpu;        // CPU time of FrameGen::process in render
+static PresentPathTiming fg_time_placebo_cpu;   // CPU time of pl_render_image
 static std::atomic<qint64> fg_present_done_us{0};
 static std::atomic<qint64> fg_blocked_renders{0}; // renders skipped while a present was in flight
 
@@ -7122,12 +7125,14 @@ void QmlMainWindow::render()
             // Where the time between presents goes (avg/max ms).
             const QString present_path = QStringLiteral(
                 "acquire %1, render %2, pacing %3, submit %4, swap %5, present->next render %6, renders skipped while presenting %7"
-                "; GPU: final render %8 per present, RTX VSR %9 per stream frame")
+                "; GPU: final render %8 per present, RTX VSR %9 per stream frame"
+                "; CPU: VSR %10, frame generation %11, pl_render_image %12")
                 .arg(fg_time_start_frame.take(), fg_time_render_work.take(), fg_time_pace.take(),
                      fg_time_submit.take(), fg_time_swap.take(), fg_time_handoff.take())
                 .arg(fg_blocked_renders.exchange(0))
                 .arg(fg_time_render_gpu.take())
-                .arg(rtx_vsr ? rtx_vsr->gpuTimeMs() : 0.0f, 0, 'f', 2);
+                .arg(rtx_vsr ? rtx_vsr->gpuTimeMs() : 0.0f, 0, 'f', 2)
+                .arg(fg_time_vsr_cpu.take(), fg_time_fg_cpu.take(), fg_time_placebo_cpu.take());
             if (fg_drop_log_us && fg_dropped_count + fg_shown_count > 0)
                 qCInfo(chiakiGui).nospace() << "[framegen] Present path in the last "
                     << (now_us - fg_drop_log_us) / 1000 << " ms (avg/max ms): " << present_path;
@@ -7989,6 +7994,7 @@ void QmlMainWindow::render()
     std::array<uint64_t, kRtxVsrMaxMixFrames> vsr_signatures;
     bool vsr_applied = false;
     const int rtx_vsr_quality = rtx_vsr && has_settings ? settings->GetRtxVsrQuality() : 0;
+    const qint64 vsr_begin_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
     if (!fg_override && rtx_vsr_quality > 0 && nvidia_card && stream_active && rtx_vsr->ensureInitialized(placebo_vulkan)) {
         const int vsr_out_w = static_cast<int>(lroundf(fabsf(pl_rect_w(target_frame.crop))));
         const int vsr_out_h = static_cast<int>(lroundf(fabsf(pl_rect_h(target_frame.crop))));
@@ -8015,6 +8021,8 @@ void QmlMainWindow::render()
             }
         }
     }
+    if (!fg_override && fg_active_multiplier > 1)
+        fg_time_vsr_cpu.add(static_cast<qint64>(chiaki_time_now_monotonic_us()) - vsr_begin_us);
     if (enhancement_log_reset.fetchAndStoreAcquire(0)) {
         rtx_vsr_active = false;
         fg_skip_logged = 0;
@@ -8109,9 +8117,12 @@ void QmlMainWindow::render()
             frame_gen->setDlssMotion(settings->GetFrameGenDlssMotion());
             frame_gen->setCleanup(settings->GetFrameGenCleanup());
             frame_gen->setVfgMode(settings->GetFrameGenVfgMode());
-            if (multiplier >= 2 &&
+            const qint64 fg_begin_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+            const bool fg_processed = multiplier >= 2 &&
                 frame_gen->process(&direct_render_frame, fg_out_w, fg_out_h, multiplier,
-                                   static_cast<float>(source_interval_s * 1000.0), fg_outputs) &&
+                                   static_cast<float>(source_interval_s * 1000.0), fg_outputs);
+            fg_time_fg_cpu.add(static_cast<qint64>(chiaki_time_now_monotonic_us()) - fg_begin_us);
+            if (fg_processed &&
                 !fg_outputs.empty()) {
                 if (fg_outputs.size() > 1 && fg_crash_guard_armed && ++fg_crash_guard_good_frames >= 120) {
                     QFile::remove(frameGenCrashGuardPath());
@@ -8218,9 +8229,12 @@ void QmlMainWindow::render()
         logLatencyStats("render_prep", render_call_begin_us - render_entry_us_local);
     if (render_call_begin_us >= render_setup_begin_us)
         logRenderSetupStats(render_call_begin_us, render_call_begin_us - render_setup_begin_us);
-    if (!(bypass_frame_queue
+    const bool placebo_rendered = bypass_frame_queue
         ? pl_render_image(placebo_renderer, &direct_render_frame, &target_frame, &params)
-        : pl_render_image_mix(placebo_renderer, render_frame_mix, &target_frame, &params)))
+        : pl_render_image_mix(placebo_renderer, render_frame_mix, &target_frame, &params);
+    if (fg_active_multiplier > 1)
+        fg_time_placebo_cpu.add(static_cast<qint64>(chiaki_time_now_monotonic_us()) - render_call_begin_us);
+    if (!placebo_rendered)
     {
         qCWarning(chiakiGui) << "Failed to render Placebo frame!";
         close_started_frame(false);
