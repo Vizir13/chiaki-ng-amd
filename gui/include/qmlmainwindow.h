@@ -365,6 +365,10 @@ private:
     qint64 fg_shown_count = 0;
     qint64 fg_dropped_count = 0;
     qint64 fg_drop_log_us = 0;
+    qint64 fg_last_pending_render_us = 0;
+    qint64 fg_pending_gap_sum_us = 0;
+    qint64 fg_pending_gap_max_us = 0;
+    qint64 fg_pending_gap_count = 0;
     QAtomicInteger<int> enhancement_log_reset = 0;
     bool fg_refresh_limited = false;
     QString video_enhancement_status;

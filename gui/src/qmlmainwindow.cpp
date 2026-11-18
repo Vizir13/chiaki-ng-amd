@@ -7030,6 +7030,15 @@ void QmlMainWindow::render()
             if (!fg_pending_frames.empty())
                 fg_shown_count++;
             fg_override = true;
+            // Interval between the renders that show generated frames.
+            const qint64 render_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+            if (fg_last_pending_render_us) {
+                const qint64 gap = render_us - fg_last_pending_render_us;
+                fg_pending_gap_sum_us += gap;
+                fg_pending_gap_max_us = std::max(fg_pending_gap_max_us, gap);
+                fg_pending_gap_count++;
+            }
+            fg_last_pending_render_us = render_us;
         }
         // The generation (and the frames before it) took too long for the
         // display rate when generated frames are dropped: report it.
@@ -7039,7 +7048,13 @@ void QmlMainWindow::render()
                 qCInfo(chiakiGui).nospace() << "[framegen] Generated frames in the last "
                     << (fg_drop_log_us ? (now_us - fg_drop_log_us) / 1000 : 0) << " ms: " << fg_shown_count
                     << " shown, " << fg_dropped_count << " dropped (not ready before the next stream frame; GPU "
-                    << (frame_gen ? frame_gen->gpuTimeMs() : 0.0f) << " ms)";
+                    << (frame_gen ? frame_gen->gpuTimeMs() : 0.0f) << " ms; "
+                    << (frame_gen ? frame_gen->takeTimingSummary() : QString())
+                    << "; renders of generated frames every "
+                    << (fg_pending_gap_count ? fg_pending_gap_sum_us / fg_pending_gap_count / 1000.0 : 0.0)
+                    << " ms avg / " << fg_pending_gap_max_us / 1000.0 << " max)";
+            fg_pending_gap_sum_us = fg_pending_gap_max_us = 0;
+            fg_pending_gap_count = 0;
             fg_drop_log_us = now_us;
             fg_shown_count = 0;
             fg_dropped_count = 0;

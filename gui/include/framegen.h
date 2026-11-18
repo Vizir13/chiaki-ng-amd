@@ -4,6 +4,8 @@
 #include <libplacebo/renderer.h>
 #include <libplacebo/vulkan.h>
 
+#include <QString>
+
 #include <memory>
 #include <vector>
 
@@ -57,6 +59,8 @@ public:
     // Average GPU time of the backend's generation work per stream frame in
     // milliseconds (0 if unknown).
     float gpuTimeMs() const;
+    // CPU time process() took since the last call (for the log).
+    QString takeTimingSummary();
 
     // The next frame starts a new sequence: nothing is interpolated across it.
     void reset();

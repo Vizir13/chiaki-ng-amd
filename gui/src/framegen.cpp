@@ -171,6 +171,12 @@ struct FrameGen::Impl
     // 2x sequence (4 frames per stream frame); see runVfgChain().
     bool vfg_chain = false;
     bool vfg_chain_active = false;
+    // CPU time of process() and of the chain inside it, for the log.
+    double stat_process_ms = 0.0;
+    double stat_process_max_ms = 0.0;
+    double stat_chain_ms = 0.0;
+    double stat_chain_max_ms = 0.0;
+    int stat_count = 0;
     std::unique_ptr<FgBackendImpl> chain_impl;
     bool chain_failed = false;
     bool chain_logged = false;
@@ -1286,6 +1292,21 @@ bool FrameGen::backendFailed(Backend backend) const
     return index < impl->backend_failed.size() && impl->backend_failed[index];
 }
 
+QString FrameGen::takeTimingSummary()
+{
+    Impl &d = *impl;
+    if (!d.stat_count)
+        return QString();
+    QString s = QStringLiteral("render thread per stream frame %1 ms avg / %2 max")
+                    .arg(d.stat_process_ms / d.stat_count, 0, 'f', 1).arg(d.stat_process_max_ms, 0, 'f', 1);
+    if (d.stat_chain_max_ms > 0.0)
+        s += QStringLiteral(", of it DLSS FG stage %1 / %2 ms")
+                 .arg(d.stat_chain_ms / d.stat_count, 0, 'f', 1).arg(d.stat_chain_max_ms, 0, 'f', 1);
+    d.stat_process_ms = d.stat_process_max_ms = d.stat_chain_ms = d.stat_chain_max_ms = 0.0;
+    d.stat_count = 0;
+    return s;
+}
+
 float FrameGen::gpuTimeMs() const
 {
     if (impl->backend == Backend::Flow && impl->backend_impl) {
@@ -1701,14 +1722,26 @@ bool FrameGen::process(const struct pl_frame *src, int out_w, int out_h, int mul
     // The chain runs up to three motion searches per stream frame (clean-up,
     // and one per DLSS pair) at the Flow Quality setting: 1/2 resolution
     // gives DLSS finer motion around small detail for a few ms more.
+    QElapsedTimer cpu_timer;
+    cpu_timer.start();
     if (!processFrames(src, out_w, out_h, chain ? 2 : multiplier, frame_interval_ms, outputs))
         return false;
     d.vfg_chain_active = false;
     if (!prev)
         d.chain_last = nullptr;
     fixupFrames(prev, outputs);
-    if (chain && d.backend == FrameGen::Backend::Vfg)
+    double chain_ms = 0.0;
+    if (chain && d.backend == FrameGen::Backend::Vfg) {
+        const qint64 before = cpu_timer.nsecsElapsed();
         d.vfg_chain_active = runVfgChain(d, outputs, frame_interval_ms * 0.5f);
+        chain_ms = (cpu_timer.nsecsElapsed() - before) / 1e6;
+    }
+    const double total_ms = cpu_timer.nsecsElapsed() / 1e6;
+    d.stat_process_ms += total_ms;
+    d.stat_process_max_ms = std::max(d.stat_process_max_ms, total_ms);
+    d.stat_chain_ms += chain_ms;
+    d.stat_chain_max_ms = std::max(d.stat_chain_max_ms, chain_ms);
+    d.stat_count++;
     return true;
 }
 
@@ -2023,6 +2056,7 @@ FrameGen::Backend FrameGen::backend() const { return Backend::None; }
 bool FrameGen::backendFailed(Backend) const { return true; }
 int FrameGen::maxMultiplier() const { return 1; }
 float FrameGen::gpuTimeMs() const { return 0.0f; }
+QString FrameGen::takeTimingSummary() { return QString(); }
 void FrameGen::reset() {}
 void FrameGen::setFlowHighQuality(bool) {}
 void FrameGen::setDlssMotion(int) {}
