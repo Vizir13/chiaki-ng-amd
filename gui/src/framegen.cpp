@@ -1695,24 +1695,30 @@ static bool runVfgChain(FrameGen::Impl &d, std::vector<struct pl_frame> &outputs
     // frame (already made for VFG's clean-up when that is on): VFG's frame
     // lies halfway, so half of that motion serves both pairs. Searching each
     // pair separately cost two more searches (~1.4 ms each at 1/4 analysis
-    // resolution, ~3.9 ms at 1/2 on 1440p).
-    bool written = false;
-    if (d.motion_flow && d.chain_last && !outputs.empty()) {
-        FgImage *real = find(outputs.back().planes[0].texture);
-        if (real && !d.motion_flow->motionVectors(d.chain_last->tex, real->tex, d.mvec.tex, &written, 0.5f, true)) {
-            d.motion_flow.reset();
-            d.motion_flow_failed = true;
-            written = false;
-        }
-    }
-    d.mvecs_from_flow = written;
-    if (written)
-        d.mvec_dirty = true;
+    // resolution, ~3.9 ms at 1/2 on 1440p). Only the cheap vector pass runs
+    // per pair, for the pixels of the pair's later frame: VFG's frame
+    // (t = 0.5) or the real one (t = 1). Vectors for the real frame's pixels
+    // given for VFG's frame were off by half the motion at the edges of
+    // moving objects, which DLSS FG turned into ghosting around them.
+    pl_tex flow_prev = d.chain_last ? d.chain_last->tex : nullptr;
+    FgImage *flow_real = outputs.empty() ? nullptr : find(outputs.back().planes[0].texture);
     for (const struct pl_frame &frame : outputs) {
         FgImage *x = find(frame.planes[0].texture);
         if (!x)
             return fail("unknown first stage frame");
         const bool reset = !d.chain_last;
+        bool written = false;
+        if (d.motion_flow && flow_prev && flow_real && !reset) {
+            const float t = x == flow_real ? 1.0f : 0.5f;
+            if (!d.motion_flow->motionVectors(flow_prev, flow_real->tex, d.mvec.tex, &written, 0.5f, true, t)) {
+                d.motion_flow.reset();
+                d.motion_flow_failed = true;
+                written = false;
+            }
+        }
+        d.mvecs_from_flow = written;
+        if (written)
+            d.mvec_dirty = true;
         // A reset call only gives DLSS its history; its output is not shown.
         FgImage &target = out[std::min<size_t>(used, out.size() - 1)];
         bool crashed = false;

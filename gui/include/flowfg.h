@@ -45,9 +45,11 @@ public:
     // false. The vectors are multiplied by `scale`. With `reuse_analysis`,
     // the motion search of the last call is reused when it was made for the
     // same `prev` and `cur` (the caller makes sure their contents did not
-    // change since); only the cheap vector pass then runs.
+    // change since); only the cheap vector pass then runs. `t` is the time
+    // of the frame whose pixels the vectors are for (1 = `cur`, 0.5 = a frame
+    // halfway between `prev` and `cur`); the motion search is unchanged.
     bool motionVectors(pl_tex prev, pl_tex cur, pl_tex out, bool *written,
-                       float scale = 1.0f, bool reuse_analysis = false);
+                       float scale = 1.0f, bool reuse_analysis = false, float t = 1.0f);
 
     // Drops all size dependent state.
     void invalidate();

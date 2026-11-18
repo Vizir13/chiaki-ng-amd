@@ -858,7 +858,7 @@ bool FlowInterpolator::interpolate(pl_tex prev, pl_tex cur, pl_tex const *output
 }
 
 bool FlowInterpolator::motionVectors(pl_tex prev, pl_tex cur, pl_tex out, bool *written,
-                                     float scale, bool reuse_analysis)
+                                     float scale, bool reuse_analysis, float t)
 {
     *written = false;
     bool analyzed = false;
@@ -877,8 +877,7 @@ bool FlowInterpolator::motionVectors(pl_tex prev, pl_tex cur, pl_tex out, bool *
     const float flow_size[2] = { static_cast<float>(d.lw[0]), static_cast<float>(d.lh[0]) };
     const float reach = d.base_scale < kDefaultBaseScale ? 2.0f : 1.0f;
     const float reach_far = d.base_scale < kDefaultBaseScale ? 9.0f : 4.0f;
-    // Candidates are scored at the current frame (t = 1).
-    const float t = 1.0f;
+    // Candidates are scored at the frame the vectors are for (t = 1: `cur`).
     if (!d.run("flow motion vectors", kSynthHeader, kVectorsBody,
                { sampledDesc("fgPrevC", prev), sampledDesc("fgCurC", cur),
                  sampledDesc("fgFlow", d.final_flow[static_cast<size_t>(d.final_index)]),
