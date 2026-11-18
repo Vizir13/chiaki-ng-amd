@@ -238,6 +238,11 @@ class StreamSession : public QObject
 		int8_t dpad_touch_id;
 		QPair<uint16_t, uint16_t> dpad_touch_value;
 		QTimer *dpad_touch_timer, *dpad_touch_stop_timer;
+		// Test mode (CHIAKI_TEST_PAN / CHIAKI_TEST_DURATION): pans the
+		// camera with the right stick and ends the stream after a while.
+		QTimer *test_pan_timer = nullptr;
+		bool test_pan_active = false;
+		int16_t test_pan_x = 0;
 		QElapsedTimer double_tap_timer;
 		RumbleHapticsIntensity rumble_haptics_intensity;
 		bool start_mic_unmuted;

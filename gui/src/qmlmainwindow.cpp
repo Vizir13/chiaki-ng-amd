@@ -5177,6 +5177,23 @@ void QmlMainWindow::doneOpenGLContextCurrent()
 
 void QmlMainWindow::init(Settings *settings, bool exit_app_on_stream_exit)
 {
+    // Test mode: CHIAKI_TEST_WINDOW_TOGGLE=<s> switches between fullscreen
+    // and a window every <s> seconds (after 15 s), to test swapchain rebuilds.
+    bool toggle_ok = false;
+    const int toggle_s = qEnvironmentVariableIntValue("CHIAKI_TEST_WINDOW_TOGGLE", &toggle_ok);
+    if (toggle_ok && toggle_s > 0) {
+        auto *toggle_timer = new QTimer(this);
+        toggle_timer->setInterval(toggle_s * 1000);
+        connect(toggle_timer, &QTimer::timeout, this, [this]() {
+            const bool to_window = windowState() == Qt::WindowFullScreen;
+            qCInfo(chiakiGui) << "Test mode: switching to" << (to_window ? "a window" : "fullscreen");
+            if (to_window)
+                normalTime();
+            else
+                fullscreenTime();
+        });
+        QTimer::singleShot(15000, toggle_timer, [toggle_timer]() { toggle_timer->start(); });
+    }
     bypass_frame_queue = settings->GetDirectFrameMapping();
     render_backend = settings->GetRenderBackend();
     setSurfaceType(render_backend == RenderBackend::Vulkan ? QWindow::VulkanSurface : QWindow::OpenGLSurface);

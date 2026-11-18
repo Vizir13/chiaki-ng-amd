@@ -809,6 +809,41 @@ void StreamSession::Start()
 		throw ChiakiException("Chiaki Session Start failed");
 	}
 	session_started = true;
+
+	// Test mode for frame pacing checks: CHIAKI_TEST_PAN=<period s> holds the
+	// right stick right then left, alternating (after 8 s for the stream to
+	// settle); CHIAKI_TEST_DURATION=<s> ends the stream after that long.
+	bool ok = false;
+	const int pan_period_s = qEnvironmentVariableIntValue("CHIAKI_TEST_PAN", &ok);
+	if(ok && pan_period_s > 0 && !test_pan_timer)
+	{
+		CHIAKI_LOGI(log.GetChiakiLog(), "Test mode: panning the camera, right stick every %d s", pan_period_s);
+		auto since = std::make_shared<QElapsedTimer>();
+		since->start();
+		test_pan_timer = new QTimer(this);
+		test_pan_timer->setInterval(16);
+		connect(test_pan_timer, &QTimer::timeout, this, [this, since, pan_period_s]() {
+			const qint64 ms = since->elapsed() - 8000;
+			if(ms < 0)
+				return;
+			const qint64 half = pan_period_s * 500;
+			test_pan_active = true;
+			test_pan_x = ((ms / half) % 2) ? -16384 : 16384;
+			SendFeedbackState();
+		});
+		test_pan_timer->start();
+	}
+	const int duration_s = qEnvironmentVariableIntValue("CHIAKI_TEST_DURATION", &ok);
+	if(ok && duration_s > 0)
+	{
+		CHIAKI_LOGI(log.GetChiakiLog(), "Test mode: stream ends after %d s", duration_s);
+		QTimer::singleShot(duration_s * 1000, this, [this]() {
+			if(test_pan_timer)
+				test_pan_timer->stop();
+			test_pan_active = false;
+			Stop();
+		});
+	}
 }
 
 void StreamSession::Stop()
@@ -1274,6 +1309,8 @@ void StreamSession::DpadSendFeedbackState()
 			dpad_touch_stop_timer->start(NEW_DPAD_TOUCH_INTERVAL_MS);
 	}
 	chiaki_controller_state_or(&state, &state, &dpad_touch_state);
+	if(test_pan_active)
+		state.right_x = test_pan_x;
 	chiaki_session_set_controller_state(&session, &state);
 }
 
@@ -1330,6 +1367,8 @@ void StreamSession::SendFeedbackState()
 			dpad_touch_stop_timer->start(NEW_DPAD_TOUCH_INTERVAL_MS);
 	}
 	chiaki_controller_state_or(&state, &state, &dpad_touch_state);
+	if(test_pan_active)
+		state.right_x = test_pan_x;
 	chiaki_session_set_controller_state(&session, &state);
 }
 

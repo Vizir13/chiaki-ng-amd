@@ -38,6 +38,10 @@ PFN_vkGetDeviceProcAddr real_gdpa = nullptr;
 PFN_vkCreateSwapchainKHR real_create_swapchain = nullptr;
 PFN_vkDestroySwapchainKHR real_destroy_swapchain = nullptr;
 PFN_vkQueuePresentKHR real_queue_present = nullptr;
+PFN_vkAcquireNextImageKHR real_acquire = nullptr;
+// Host access to a swapchain must be externally synchronized: acquires
+// (render thread), presents (present thread), create and destroy take it.
+std::mutex swapchain_sync;
 PFN_vkQueueSubmit real_queue_submit = nullptr;
 PFN_vkQueueSubmit2 real_queue_submit2 = nullptr;
 PFN_vkQueueSubmit2 real_queue_submit2_khr = nullptr;
@@ -164,9 +168,20 @@ void waiterLoop()
     }
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL wrapCreateSwapchain(VkDevice dev, const VkSwapchainCreateInfoKHR *info,
+void flushPresents(VkSwapchainKHR sc);
+uint32_t moreImages(const VkSwapchainCreateInfoKHR *info);
+
+VKAPI_ATTR VkResult VKAPI_CALL wrapCreateSwapchain(VkDevice dev, const VkSwapchainCreateInfoKHR *orig_info,
                                                    const VkAllocationCallbacks *alloc, VkSwapchainKHR *out)
 {
+    if (orig_info->oldSwapchain != VK_NULL_HANDLE)
+        flushPresents(orig_info->oldSwapchain);
+    std::lock_guard<std::mutex> sync(swapchain_sync);
+    // One image more than libplacebo asks for: presents waiting on the
+    // present thread still hold theirs, and the next acquire should not wait.
+    VkSwapchainCreateInfoKHR base = *orig_info;
+    base.minImageCount = moreImages(orig_info);
+    const VkSwapchainCreateInfoKHR *info = &base;
     VkResult res;
     bool latency_mode = false;
     if (low_latency.load() && low_latency_wanted.load()) {
@@ -209,8 +224,6 @@ VKAPI_ATTR VkResult VKAPI_CALL wrapCreateSwapchain(VkDevice dev, const VkSwapcha
     return res;
 }
 
-void flushPresents(VkSwapchainKHR sc);
-
 VKAPI_ATTR void VKAPI_CALL wrapDestroySwapchain(VkDevice dev, VkSwapchainKHR sc, const VkAllocationCallbacks *alloc)
 {
     // Presents of it still waiting on the present thread go out first.
@@ -227,7 +240,31 @@ VKAPI_ATTR void VKAPI_CALL wrapDestroySwapchain(VkDevice dev, VkSwapchainKHR sc,
         for (auto it = queue.begin(); it != queue.end();)
             it = it->swapchain == sc ? queue.erase(it) : it + 1;
     }
+    std::lock_guard<std::mutex> sync(swapchain_sync);
     real_destroy_swapchain(dev, sc, alloc);
+}
+
+// Acquire without blocking while holding the sync lock (a blocked acquire
+// would wait for an image only a queued present frees: that deadlocked,
+// the window flickered and hung leaving fullscreen).
+VKAPI_ATTR VkResult VKAPI_CALL wrapAcquireNextImage(VkDevice dev, VkSwapchainKHR sc, uint64_t timeout,
+                                                    VkSemaphore sem, VkFence fence, uint32_t *idx)
+{
+    const qint64 begin = nowUs();
+    for (;;) {
+        VkResult res;
+        {
+            std::lock_guard<std::mutex> sync(swapchain_sync);
+            res = real_acquire(dev, sc, 0, sem, fence, idx);
+        }
+        if (res != VK_NOT_READY && res != VK_TIMEOUT)
+            return res;
+        if (timeout == 0)
+            return res;
+        if (timeout != UINT64_MAX && static_cast<uint64_t>(nowUs() - begin) * 1000ull >= timeout)
+            return VK_TIMEOUT;
+        std::this_thread::sleep_for(std::chrono::microseconds(250));
+    }
 }
 
 // Sleeps until `target` (bounded, in case it is stale); returns the wait.
@@ -294,7 +331,11 @@ void runJob(PresentJob &job)
     }
     const uint32_t qf = placebo_vk->queue_graphics.index;
     placebo_vk->lock_queue(placebo_vk, qf, job.qidx);
-    const VkResult res = doPresent(job.queue, &pi, job.id);
+    VkResult res;
+    {
+        std::lock_guard<std::mutex> sync(swapchain_sync);
+        res = doPresent(job.queue, &pi, job.id);
+    }
     placebo_vk->unlock_queue(placebo_vk, qf, job.qidx);
     if (job.target > 0) {
         if (auto cb = present_done.load())
@@ -359,6 +400,23 @@ int graphicsQueueIndex(VkQueue q)
             return static_cast<int>(i);
     }
     return -1;
+}
+
+uint32_t moreImages(const VkSwapchainCreateInfoKHR *info)
+{
+    if (!presenter.joinable() || !placebo_vk || !real_gipa)
+        return info->minImageCount;
+    static PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR get_caps = nullptr;
+    if (!get_caps)
+        get_caps = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(
+            real_gipa(placebo_vk->instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
+    VkSurfaceCapabilitiesKHR caps = {};
+    if (!get_caps || get_caps(placebo_vk->phys_device, info->surface, &caps) != VK_SUCCESS)
+        return info->minImageCount;
+    uint32_t n = info->minImageCount + 1;
+    if (caps.maxImageCount > 0)
+        n = qMin(n, caps.maxImageCount);
+    return n;
 }
 
 // What the present thread can take: one swapchain, no results array, and
@@ -503,6 +561,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL wrapGetDeviceProcAddr(VkDevice dev, con
     WRAP("vkCreateSwapchainKHR", real_create_swapchain, wrapCreateSwapchain)
     WRAP("vkDestroySwapchainKHR", real_destroy_swapchain, wrapDestroySwapchain)
     WRAP("vkQueuePresentKHR", real_queue_present, wrapQueuePresent)
+    WRAP("vkAcquireNextImageKHR", real_acquire, wrapAcquireNextImage)
     WRAP("vkQueueSubmit", real_queue_submit, wrapQueueSubmit)
     WRAP("vkQueueSubmit2", real_queue_submit2, wrapQueueSubmit2)
     WRAP("vkQueueSubmit2KHR", real_queue_submit2_khr, wrapQueueSubmit2Khr)
