@@ -310,6 +310,9 @@ private:
     // arrival (render thread). fg_present_target_us is the time the frame
     // being rendered should go out (0: the regular pacing).
     qint64 fg_arrival_est_us = 0;
+    // Learned stream frame period and the last arrival (jitter buffer).
+    double fg_period_est_us = 0.0;
+    qint64 fg_last_arrival_us = 0;
     qint64 fg_sched_base_us = 0;
     qint64 fg_sched_step_us = 0;
     int fg_sched_index = 0;

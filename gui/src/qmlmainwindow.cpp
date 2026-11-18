@@ -8236,18 +8236,31 @@ void QmlMainWindow::render()
                 const qint64 period_us = static_cast<qint64>(llround(source_interval_s * 1000000.0));
                 if (multiplier == 2 && jitter_us > 0 && period_us > 0 && direct_frame_arrival_us > 0 &&
                     fg_outputs.size() == 2) {
-                    const qint64 predicted_us = fg_arrival_est_us + period_us;
+                    // The real period differs from the configured one (console
+                    // and PC clocks); with a fixed period the clock settled
+                    // ~10x the per-frame difference off (~11 ms seen), which
+                    // ate the delay. Learn it from the gaps between arrivals,
+                    // ignoring the ones around skipped or bunched frames.
+                    if (fg_period_est_us <= 0.0 || qAbs(fg_period_est_us - period_us) > period_us * 0.2)
+                        fg_period_est_us = static_cast<double>(period_us);
+                    if (fg_last_arrival_us > 0) {
+                        const double gap_us = static_cast<double>(direct_frame_arrival_us - fg_last_arrival_us);
+                        if (qAbs(gap_us - fg_period_est_us) < fg_period_est_us * 0.25)
+                            fg_period_est_us += (gap_us - fg_period_est_us) * 0.02;
+                    }
+                    fg_last_arrival_us = direct_frame_arrival_us;
+                    const qint64 period_est_us = static_cast<qint64>(llround(fg_period_est_us));
+                    const qint64 predicted_us = fg_arrival_est_us + period_est_us;
                     const qint64 error_us = direct_frame_arrival_us - predicted_us;
-                    if (fg_arrival_est_us == 0 || qAbs(error_us) > 2 * period_us) {
+                    if (fg_arrival_est_us == 0 || qAbs(error_us) > 2 * period_est_us) {
                         fg_arrival_est_us = direct_frame_arrival_us;
                     } else {
                         fg_time_arrival_jitter.add(qAbs(error_us));
-                        // Follows clock drift between console and PC slowly;
-                        // single late or early frames barely move it.
+                        // Single late or early frames barely move the clock.
                         fg_arrival_est_us = predicted_us + error_us / 10;
                     }
                     fg_sched_base_us = fg_arrival_est_us + jitter_us;
-                    fg_sched_step_us = period_us / multiplier;
+                    fg_sched_step_us = period_est_us / multiplier;
                     fg_sched_index = 0;
                     fg_present_target_us = fg_sched_base_us;
                 }
