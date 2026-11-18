@@ -10,11 +10,15 @@ Button {
     // Filled with the accent color (the main action of a screen)
     property bool primary: false
     property real radius: Theme.radiusSmall
+    // Controller button drawn at the left (e.g. root.controllerButton("cross"))
+    property string glyph
+    // Keep the border on a flat button
+    property bool outlined: false
 
     font.family: Theme.fontFamily
     font.pixelSize: Theme.fontBody
     font.weight: Font.DemiBold
-    leftPadding: 22
+    leftPadding: glyph.length ? 56 : 22
     rightPadding: 22
     topPadding: 12
     bottomPadding: 12
@@ -33,9 +37,22 @@ Button {
                 return control.hovered ? Theme.surface : "transparent";
             return control.hovered ? Theme.surfaceRaised : Theme.surface;
         }
-        border.width: control.visualFocus ? Theme.focusWidth : (control.primary || (control.flat && !control.hovered) ? 0 : 1)
+        border.width: control.visualFocus ? Theme.focusWidth : (control.primary || (control.flat && !control.hovered && !control.outlined) ? 0 : 1)
         border.color: control.visualFocus ? (control.primary ? Theme.text : Theme.accent) : Theme.border
         opacity: control.enabled ? 1.0 : 0.5
+    }
+
+    Image {
+        visible: control.glyph.length > 0
+        anchors {
+            left: parent.left
+            leftMargin: 16
+            verticalCenter: parent.verticalCenter
+        }
+        width: 28
+        height: 28
+        sourceSize: Qt.size(width, height)
+        source: control.glyph
     }
 
     Component.onDestruction: {

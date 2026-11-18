@@ -16,6 +16,7 @@ DialogView {
     }
     property int selectedConsole: SettingsDialog.Console.PS5
     property bool quitControllerMapping: true
+    property string initialPage
     id: dialog
     title: qsTr("Settings")
     header: qsTr("* Defaults in () to right of value or marked with (Default)")

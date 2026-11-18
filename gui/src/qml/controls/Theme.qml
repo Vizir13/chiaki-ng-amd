@@ -10,6 +10,7 @@ QtObject {
     readonly property color bgDeep: "#0A0E13"      // side navigation
     readonly property color bg: "#0D1117"          // page background
     readonly property color surface: "#151B23"     // cards
+    readonly property color surfaceInset: "#101722" // picture panel inside a card
     readonly property color surfaceRaised: "#1C2430" // tiles inside cards
     readonly property color surfaceSelected: "#172130" // selected nav item
     readonly property color surfaceAccent: "#12263A"   // selected preset card

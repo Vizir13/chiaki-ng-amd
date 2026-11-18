@@ -236,8 +236,8 @@ Item {
         stack.push(registDialogComponent, {host: host, ps5: ps5});
     }
 
-    function showSettingsDialog() {
-        stack.push(settingsDialogComponent);
+    function showSettingsDialog(page) {
+        stack.push(settingsDialogComponent, page ? {initialPage: page} : {});
     }
 
     function showDisplaySettingsDialog() {
