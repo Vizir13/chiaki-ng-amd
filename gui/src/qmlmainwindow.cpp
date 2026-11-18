@@ -63,6 +63,11 @@ extern "C" {
 #include <mutex>
 #include <utility>
 #include <atomic>
+#include <cmath>
+#ifdef _WIN32
+#include <windows.h>
+#include <dwmapi.h>
+#endif
 #if defined(Q_OS_MACOS)
 #include <objc/message.h>
 #endif
@@ -894,6 +899,7 @@ static PresentPathTiming fg_time_video_latency; // decoded stream frame -> its r
 static PresentPathTiming fg_time_arrival_jitter; // stream frame arrival vs the smoothed clock
 static PresentPathTiming fg_time_present_jitter; // scheduled present interval error
 static PresentPathTiming fg_time_present_late;   // scheduled present past its target
+static PresentPathTiming fg_time_vblank_shift;   // scheduled present moved onto the vblank grid
 
 // Jitter buffer of 2x frame generation in ms (CHIAKI_FG_JITTER_MS, 0 = off).
 static qint64 frameGenJitterBufferUs()
@@ -904,6 +910,76 @@ static qint64 frameGenJitterBufferUs()
         return ok ? static_cast<qint64>(qBound(0, ms, 30)) * 1000 : qint64(8000);
     }();
     return us;
+}
+
+// Moves a scheduled frame generation present onto the display's vblank grid:
+// it is submitted `margin` before a vblank, so timing noise up to that margin
+// does not move it to the neighbouring vblank (at 180 Hz a refresh is 5.6 ms,
+// and a frame shown for 2 or 4 refreshes instead of 3 is visible judder when
+// the camera pans). The vblank comes from DWM (QPC, like the monotonic clock);
+// used only when its refresh period matches the window's display.
+// CHIAKI_FG_VBLANK_SNAP=0 turns it off.
+static qint64 snapPresentToVblank(qint64 target_us, double refresh_rate)
+{
+#ifdef _WIN32
+    static const bool enabled = []() {
+        bool ok = false;
+        const int v = qEnvironmentVariableIntValue("CHIAKI_FG_VBLANK_SNAP", &ok);
+        return !ok || v != 0;
+    }();
+    if (!enabled || target_us <= 0 || refresh_rate <= 1.0)
+        return target_us;
+    static qint64 vblank_us = 0;
+    static double period_us = 0.0;
+    static qint64 queried_us = 0;
+    static bool usable = false;
+    static int logged = -1;
+    static double prev_shift_us = 0.0;
+    const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+    if (now_us - queried_us > 250000) {
+        queried_us = now_us;
+        usable = false;
+        DWM_TIMING_INFO info = {};
+        info.cbSize = sizeof(info);
+        LARGE_INTEGER freq;
+        if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &info)) && QueryPerformanceFrequency(&freq) &&
+            freq.QuadPart > 0 && info.qpcRefreshPeriod > 0 && info.qpcVBlank > 0) {
+            // Same conversion as chiaki_time_now_monotonic_us.
+            vblank_us = static_cast<qint64>(info.qpcVBlank * 1000000ull / static_cast<ULONGLONG>(freq.QuadPart));
+            period_us = static_cast<double>(info.qpcRefreshPeriod) * 1000000.0 / static_cast<double>(freq.QuadPart);
+            usable = qAbs(period_us - 1000000.0 / refresh_rate) < period_us * 0.03;
+        }
+        if (static_cast<int>(usable) != logged) {
+            logged = static_cast<int>(usable);
+            qCInfo(chiakiGui).nospace() << "[framegen] Present vblank alignment "
+                << (usable ? "on" : "off") << ": DWM refresh period " << period_us / 1000.0
+                << " ms, display " << refresh_rate << " Hz";
+        }
+    }
+    if (!usable)
+        return target_us;
+    // Submit this long before the vblank (CPU and GPU time to the flip).
+    const double margin_us = period_us * 0.6;
+    const double phase = std::fmod(static_cast<double>(target_us - vblank_us), period_us);
+    const double p = phase < 0.0 ? phase + period_us : phase;
+    // Shift onto (vblank - margin), the nearest one, keeping the side chosen
+    // last time unless it moves the present by more than 3/4 of a refresh, so
+    // a target sitting at the boundary does not alternate between vblanks.
+    double shift = (period_us - margin_us) - p;
+    while (shift > period_us / 2)
+        shift -= period_us;
+    while (shift <= -period_us / 2)
+        shift += period_us;
+    const double other = shift > 0.0 ? shift - period_us : shift + period_us;
+    if (qAbs(other - prev_shift_us) < qAbs(shift - prev_shift_us) && qAbs(other) < period_us * 0.75)
+        shift = other;
+    prev_shift_us = shift;
+    fg_time_vblank_shift.add(static_cast<qint64>(std::llround(qAbs(shift))));
+    return target_us + static_cast<qint64>(std::llround(shift));
+#else
+    Q_UNUSED(refresh_rate);
+    return target_us;
+#endif
 }
 
 // Sleeps until `target_us` (monotonic), spinning for the last stretch.
@@ -7171,7 +7247,8 @@ void QmlMainWindow::render()
             fg_override_frame = fg_pending_frames.front();
             fg_pending_frames.erase(fg_pending_frames.begin());
             if (fg_sched_base_us > 0)
-                fg_present_target_us = fg_sched_base_us + ++fg_sched_index * fg_sched_step_us;
+                fg_present_target_us = snapPresentToVblank(fg_sched_base_us + ++fg_sched_index * fg_sched_step_us,
+                                                           refresh_rate);
             // The last one is the stream frame's real frame.
             if (fg_pending_frames.empty() && fg_pending_arrival_us > 0)
                 fg_time_video_latency.add(static_cast<qint64>(chiaki_time_now_monotonic_us()) - fg_pending_arrival_us);
@@ -7198,7 +7275,7 @@ void QmlMainWindow::render()
                 "; GPU: final render %8 per present, RTX VSR %9 per stream frame"
                 "; CPU: VSR %10, frame generation %11, pl_render_image %12"
                 "; stream frame -> its real frame rendered %13; repeated pictures %14"
-                "; jitter buffer: arrival off clock %15, present interval error %16, present late %17")
+                "; jitter buffer: arrival off clock %15, present interval error %16, present late %17, vblank shift %18")
                 .arg(fg_time_start_frame.take(), fg_time_render_work.take(), fg_time_pace.take(),
                      fg_time_submit.take(), fg_time_swap.take(), fg_time_handoff.take())
                 .arg(fg_blocked_renders.exchange(0))
@@ -7207,7 +7284,8 @@ void QmlMainWindow::render()
                 .arg(fg_time_vsr_cpu.take(), fg_time_fg_cpu.take(), fg_time_placebo_cpu.take())
                 .arg(fg_time_video_latency.take())
                 .arg(fg_repeat_frames.exchange(0))
-                .arg(fg_time_arrival_jitter.take(), fg_time_present_jitter.take(), fg_time_present_late.take());
+                .arg(fg_time_arrival_jitter.take(), fg_time_present_jitter.take(), fg_time_present_late.take())
+                .arg(fg_time_vblank_shift.take());
             if (fg_drop_log_us && fg_dropped_count + fg_shown_count > 0)
                 qCInfo(chiakiGui).nospace() << "[framegen] Present path in the last "
                     << (now_us - fg_drop_log_us) / 1000 << " ms (avg/max ms): " << present_path;
@@ -8262,7 +8340,7 @@ void QmlMainWindow::render()
                     fg_sched_base_us = fg_arrival_est_us + jitter_us;
                     fg_sched_step_us = period_est_us / multiplier;
                     fg_sched_index = 0;
-                    fg_present_target_us = fg_sched_base_us;
+                    fg_present_target_us = snapPresentToVblank(fg_sched_base_us, refresh_rate);
                 }
                 if (fg_active_multiplier != multiplier || fg_active_cadence != cadence)
                     qCInfo(chiakiGui).nospace() << "Frame generation active: " << FrameGen::backendName(backend_choice)

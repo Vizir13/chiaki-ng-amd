@@ -118,7 +118,8 @@ target_link_libraries(chiaki chiaki-lib)
 if(WIN32)
 	# Stream tuning: MMCSS (avrt) and timer resolution (winmm); version for reading nvngx_vsr.dll file version;
 	# dbghelp: minidumps on crashes (main.cpp).
-	target_link_libraries(chiaki avrt winmm version dbghelp)
+	# dwmapi: vblank timing for frame generation presents.
+	target_link_libraries(chiaki avrt winmm version dbghelp dwmapi)
 endif()
 
 if(CHIAKI_ENABLE_NGX)
