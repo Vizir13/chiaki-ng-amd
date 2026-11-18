@@ -209,8 +209,12 @@ VKAPI_ATTR VkResult VKAPI_CALL wrapCreateSwapchain(VkDevice dev, const VkSwapcha
     return res;
 }
 
+void flushPresents(VkSwapchainKHR sc);
+
 VKAPI_ATTR void VKAPI_CALL wrapDestroySwapchain(VkDevice dev, VkSwapchainKHR sc, const VkAllocationCallbacks *alloc)
 {
+    // Presents of it still waiting on the present thread go out first.
+    flushPresents(sc);
     {
         // Waits for a present wait on it to return.
         std::lock_guard<std::mutex> wait_lock(wait_mutex);
@@ -226,29 +230,195 @@ VKAPI_ATTR void VKAPI_CALL wrapDestroySwapchain(VkDevice dev, VkSwapchainKHR sc,
     real_destroy_swapchain(dev, sc, alloc);
 }
 
+// Sleeps until `target` (bounded, in case it is stale); returns the wait.
+qint64 waitForTarget(qint64 target)
+{
+    const qint64 begin = nowUs();
+    const qint64 until = qMin(target, begin + 50000);
+    for (;;) {
+        const qint64 remaining = until - nowUs();
+        if (remaining <= 0)
+            break;
+        if (remaining > 1500)
+            std::this_thread::sleep_for(std::chrono::microseconds(remaining - 1000));
+        else
+            std::this_thread::yield();
+    }
+    return nowUs() - begin;
+}
+
+VkResult doPresent(VkQueue q, const VkPresentInfoKHR *info, uint64_t id);
+
+// Present thread: scheduled presents wait for their time here, so the
+// render thread goes on with the next stream frame meanwhile (waiting there
+// started the next frame's VSR / VFG late, and its generated frame then
+// missed its vblank: frames stayed 2 and 4 refreshes instead of 3).
+struct PresentJob {
+    VkQueue queue;
+    uint32_t qidx;
+    qint64 target;
+    uint64_t id;
+    std::vector<VkSemaphore> waits;
+    VkSwapchainKHR swapchain;
+    uint32_t image;
+    bool has_fence;
+    VkFence fence;
+};
+pl_vulkan placebo_vk = nullptr;
+std::mutex present_mutex;
+std::condition_variable present_cv;
+std::deque<PresentJob> present_jobs;
+VkSwapchainKHR present_busy = VK_NULL_HANDLE;
+std::thread presenter;
+bool presenter_stop = false;
+std::atomic<int> async_error{VK_SUCCESS};
+
+void runJob(PresentJob &job)
+{
+    qint64 waited = 0;
+    if (job.target > 0)
+        waited = waitForTarget(job.target);
+    VkSwapchainPresentFenceInfoKHR fence_info = {};
+    VkPresentInfoKHR pi = {};
+    pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    pi.waitSemaphoreCount = static_cast<uint32_t>(job.waits.size());
+    pi.pWaitSemaphores = job.waits.data();
+    pi.swapchainCount = 1;
+    pi.pSwapchains = &job.swapchain;
+    pi.pImageIndices = &job.image;
+    if (job.has_fence) {
+        fence_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR;
+        fence_info.swapchainCount = 1;
+        fence_info.pFences = &job.fence;
+        pi.pNext = &fence_info;
+    }
+    const uint32_t qf = placebo_vk->queue_graphics.index;
+    placebo_vk->lock_queue(placebo_vk, qf, job.qidx);
+    const VkResult res = doPresent(job.queue, &pi, job.id);
+    placebo_vk->unlock_queue(placebo_vk, qf, job.qidx);
+    if (job.target > 0) {
+        if (auto cb = present_done.load())
+            cb(job.target, nowUs(), waited);
+    }
+    if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_ERROR_SURFACE_LOST_KHR)
+        async_error.store(res);
+    else if (res != VK_SUCCESS) {
+        int expected = VK_SUCCESS;
+        async_error.compare_exchange_strong(expected, res);
+    }
+}
+
+void presenterLoop()
+{
+    std::unique_lock<std::mutex> lock(present_mutex);
+    for (;;) {
+        present_cv.wait(lock, [] { return presenter_stop || !present_jobs.empty(); });
+        if (presenter_stop)
+            return;
+        PresentJob job = std::move(present_jobs.front());
+        present_jobs.pop_front();
+        present_busy = job.swapchain;
+        lock.unlock();
+        runJob(job);
+        lock.lock();
+        present_busy = VK_NULL_HANDLE;
+        present_cv.notify_all();
+    }
+}
+
+void flushPresents(VkSwapchainKHR sc)
+{
+    if (!presenter.joinable())
+        return;
+    std::unique_lock<std::mutex> lock(present_mutex);
+    present_cv.wait(lock, [sc] {
+        if (present_busy == sc)
+            return false;
+        for (const auto &j : present_jobs) {
+            if (j.swapchain == sc)
+                return false;
+        }
+        return true;
+    });
+}
+
+// Index of `q` in libplacebo's graphics queue family, or -1.
+int graphicsQueueIndex(VkQueue q)
+{
+    static PFN_vkGetDeviceQueue get_queue = nullptr;
+    if (!placebo_vk)
+        return -1;
+    if (!get_queue)
+        get_queue = reinterpret_cast<PFN_vkGetDeviceQueue>(real_gdpa(device, "vkGetDeviceQueue"));
+    if (!get_queue)
+        return -1;
+    for (uint32_t i = 0; i < placebo_vk->queue_graphics.count; i++) {
+        VkQueue gq = VK_NULL_HANDLE;
+        get_queue(device, placebo_vk->queue_graphics.index, i, &gq);
+        if (gq == q)
+            return static_cast<int>(i);
+    }
+    return -1;
+}
+
+// What the present thread can take: one swapchain, no results array, and
+// at most libplacebo's present fence in the chain.
+bool queueable(const VkPresentInfoKHR *info, bool *has_fence, VkFence *fence)
+{
+    *has_fence = false;
+    if (info->swapchainCount != 1 || info->pResults)
+        return false;
+    for (auto *s = reinterpret_cast<const VkBaseInStructure *>(info->pNext); s; s = s->pNext) {
+        if (s->sType != VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_KHR)
+            return false;
+        auto *f = reinterpret_cast<const VkSwapchainPresentFenceInfoKHR *>(s);
+        if (f->swapchainCount != 1 || !f->pFences)
+            return false;
+        *has_fence = true;
+        *fence = f->pFences[0];
+    }
+    return true;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL wrapQueuePresent(VkQueue q, const VkPresentInfoKHR *info)
 {
-    // Scheduled present: the rendering is already on the GPU; only the flip
-    // waits for its time (bounded, in case the target is stale).
     const qint64 target = present_target_us.exchange(0);
-    if (target > 0) {
-        const qint64 begin = nowUs();
-        const qint64 until = qMin(target, begin + 50000);
-        for (;;) {
-            const qint64 remaining = until - nowUs();
-            if (remaining <= 0)
-                break;
-            if (remaining > 1500)
-                std::this_thread::sleep_for(std::chrono::microseconds(remaining - 1000));
-            else
-                std::this_thread::yield();
+    const uint64_t id = present_ids.load() && info->swapchainCount > 0 ? last_present_id.fetch_add(1) + 1 : 0;
+    bool has_fence = false;
+    VkFence fence = VK_NULL_HANDLE;
+    int qidx = -1;
+    if (presenter.joinable() && queueable(info, &has_fence, &fence) && (qidx = graphicsQueueIndex(q)) >= 0) {
+        PresentJob job;
+        job.queue = q;
+        job.qidx = static_cast<uint32_t>(qidx);
+        job.target = target;
+        job.id = id;
+        job.waits.assign(info->pWaitSemaphores, info->pWaitSemaphores + info->waitSemaphoreCount);
+        job.swapchain = info->pSwapchains[0];
+        job.image = info->pImageIndices[0];
+        job.has_fence = has_fence;
+        job.fence = fence;
+        {
+            std::lock_guard<std::mutex> lock(present_mutex);
+            present_jobs.push_back(std::move(job));
         }
-        if (auto cb = present_done.load())
-            cb(target, nowUs(), nowUs() - begin);
+        present_cv.notify_all();
+        // A failure of an earlier present (e.g. out of date) is reported now.
+        return static_cast<VkResult>(async_error.exchange(VK_SUCCESS));
     }
-    if (!present_ids.load() || info->swapchainCount == 0)
+    // Inline: the rendering is already on the GPU; only the flip waits.
+    if (target > 0) {
+        const qint64 waited = waitForTarget(target);
+        if (auto cb = present_done.load())
+            cb(target, nowUs(), waited);
+    }
+    return doPresent(q, info, id);
+}
+
+VkResult doPresent(VkQueue q, const VkPresentInfoKHR *info, uint64_t id)
+{
+    if (id == 0)
         return real_queue_present(q, info);
-    const uint64_t id = last_present_id.fetch_add(1) + 1;
     std::vector<uint64_t> ids(info->swapchainCount, id);
     VkPresentIdKHR pid = {};
     pid.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR;
@@ -417,6 +587,13 @@ void onDeviceCreated(pl_vulkan vk)
     present_ids.store(ids && real_queue_present);
     present_wait.store(waits && wait_for_present && real_queue_present);
     low_latency.store(latency && set_sleep_mode && set_marker && real_create_swapchain && real_queue_present);
+    placebo_vk = vk;
+    if (real_queue_present && vk->lock_queue && vk->unlock_queue && !envOff("CHIAKI_ASYNC_PRESENT") &&
+        !presenter.joinable()) {
+        presenter_stop = false;
+        async_error.store(VK_SUCCESS);
+        presenter = std::thread(presenterLoop);
+    }
     if (present_wait.load() && !waiter.joinable()) {
         waiter_stop = false;
         waiter = std::thread(waiterLoop);
@@ -424,11 +601,22 @@ void onDeviceCreated(pl_vulkan vk)
     qCInfo(chiakiGui).nospace() << "[reflex] NVIDIA Reflex (VK_NV_low_latency2) "
                                 << (low_latency.load() ? "on" : "off") << ", present ids "
                                 << (present_ids.load() ? "on" : "off") << ", present wait "
-                                << (present_wait.load() ? "on" : "off");
+                                << (present_wait.load() ? "on" : "off") << ", present thread "
+                                << (presenter.joinable() ? "on" : "off");
 }
 
 void onDeviceDestroyed()
 {
+    if (presenter.joinable()) {
+        {
+            std::lock_guard<std::mutex> lock(present_mutex);
+            presenter_stop = true;
+            present_jobs.clear();
+        }
+        present_cv.notify_all();
+        presenter.join();
+    }
+    placebo_vk = nullptr;
     if (waiter.joinable()) {
         {
             std::lock_guard<std::mutex> lock(queue_mutex);
