@@ -68,6 +68,13 @@ Item {
         return placeboSettingsRect.opacity || displaySettingsRect.opacity || colorMappingSettingsRect.opacity || enhancementSettingsRect.opacity;
     }
 
+    function toggleEnhancementSettings() {
+        if (enhancementSettingsRect.opacity)
+            closeDialog();
+        else
+            openEnhancementSettings();
+    }
+
     function openEnhancementSettings() {
         useSeparateStreamSettingsWindows = preferSeparateStreamSettingsWindows;
         const loader = useSeparateStreamSettingsWindows ? separateEnhancementSettingsLoader : enhancementSettingsLoader;
@@ -424,6 +431,11 @@ Item {
 
         Shortcut {
             sequence: "Ctrl+O"
+            onActivated: root.closeDialog()
+        }
+
+        Shortcut {
+            sequence: "Ctrl+E"
             onActivated: root.closeDialog()
         }
 

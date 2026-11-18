@@ -192,6 +192,8 @@ signals:
     void zoomFactorChanged();
     void videoPresetChanged();
     void menuRequested();
+    // Ctrl+E: open/close the Enhancement panel directly.
+    void enhancementRequested();
     void directStreamChanged();
     void queueDepthAverageChanged();
     void pendingFrameAgeChanged();

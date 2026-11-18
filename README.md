@@ -44,7 +44,7 @@ Notes:
 
 ### In-stream controls and stats
 
-- **Enhancement panel (Ctrl+O → Enhancement)**: change RTX VSR mode, frame generation backend / multiplier / Flow quality, RCAS strength and border fill while streaming, without leaving the stream; it shows what is active and the stream / display fps.
+- **Enhancement panel (Ctrl+E, or Ctrl+O → Enhancement)**: change RTX VSR mode, frame generation backend / multiplier / Flow quality, RCAS strength and border fill while streaming, without leaving the stream; it shows what is active and the stream / display fps.
 - **Stats overlay**: stream fps / display fps, bitrate, packet loss, plus RTX VSR / frame generation state and GPU time (e.g. `VFG 4x 6.8 ms`). Styles Mini / Compact (one line) / Default / Full and nine positions (e.g. one line at the top center); it follows the stream window instead of staying above other applications.
 - **Disconnect dialog**: Cancel button and × to keep streaming instead of always closing the stream.
 

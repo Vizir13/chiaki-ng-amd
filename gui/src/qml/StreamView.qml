@@ -1424,6 +1424,15 @@ Item {
             menuController.toggle();
             Chiaki.window.requestOverlayUpdate();
         }
+
+        function onEnhancementRequested() {
+            if (sessionPinDialog.opened || sessionStopDialog.opened || separateSessionPinWindow.visible || separateSessionStopWindow.visible)
+                return;
+            if (menuController.open)
+                menuController.close();
+            root.toggleEnhancementSettings();
+            Chiaki.window.requestOverlayUpdate();
+        }
     }
     Connections {
         target: Chiaki

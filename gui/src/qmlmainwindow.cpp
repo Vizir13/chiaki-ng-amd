@@ -8144,6 +8144,11 @@ bool QmlMainWindow::handleShortcut(QKeyEvent *event)
     case Qt::Key_O:
         emit menuRequested();
         return true;
+    case Qt::Key_E:
+        if (!session)
+            return false;
+        emit enhancementRequested();
+        return true;
     case Qt::Key_Q:
 #ifndef Q_OS_MACOS
         close();
