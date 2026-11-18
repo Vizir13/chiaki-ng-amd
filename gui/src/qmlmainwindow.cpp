@@ -7008,18 +7008,22 @@ void QmlMainWindow::render()
             QMutexLocker locker(&direct_frame_mutex);
             incoming_waiting = direct_pending_frame != nullptr;
         }
-        if (incoming_waiting) {
-            // A new stream frame is already waiting: drop the remaining
-            // generated frames but still show the real one.
-            fg_override_frame = fg_pending_frames.back();
-            fg_dropped_count += static_cast<qint64>(fg_pending_frames.size()) - 1;
-            fg_pending_frames.clear();
-        } else {
-            fg_override_frame = fg_pending_frames.front();
-            fg_pending_frames.erase(fg_pending_frames.begin());
-            if (!fg_pending_frames.empty())
-                fg_shown_count++;
+        // A new stream frame is already waiting while frames of this one are
+        // left. The first of them only becomes ready after the whole
+        // generation (e.g. VFG + DLSS FG ~15 ms), so the rest regularly
+        // runs past the next stream frame; dropping them all made 4x come
+        // out at ~3x. Fall at most one generated frame behind instead (the
+        // next stream frame waits up to two display refreshes), and drop
+        // only what is beyond that.
+        if (incoming_waiting && fg_pending_frames.size() > 2) {
+            const auto drop = static_cast<std::ptrdiff_t>(fg_pending_frames.size() - 2);
+            fg_dropped_count += drop;
+            fg_pending_frames.erase(fg_pending_frames.begin(), fg_pending_frames.begin() + drop);
         }
+        fg_override_frame = fg_pending_frames.front();
+        fg_pending_frames.erase(fg_pending_frames.begin());
+        if (!fg_pending_frames.empty())
+            fg_shown_count++;
         fg_override = true;
         // The generation (and the frames before it) took too long for the
         // display rate when generated frames are dropped: report it.
@@ -8076,7 +8080,14 @@ void QmlMainWindow::render()
         schedulePostRenderWork();
     schedulePostSwapchainRecreateRefresh();
     // Frames left over from frame generation are presented by the next renders.
-    if (!fg_pending_frames.empty())
+    bool stream_frame_waiting = false;
+    if (fg_pending_frames.empty() && bypass_frame_queue) {
+        // A stream frame that arrived while generated frames were still
+        // being shown has waited for them; render it next.
+        QMutexLocker locker(&direct_frame_mutex);
+        stream_frame_waiting = direct_pending_frame != nullptr;
+    }
+    if (!fg_pending_frames.empty() || stream_frame_waiting)
         scheduleUpdate(false, UpdateRequestReason::PendingFrame);
 }
 
