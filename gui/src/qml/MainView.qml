@@ -61,6 +61,22 @@ Pane {
         select(visibleIndexes[pos]);
     }
 
+    // Left/Right on the home screen: previous/next Smoothness preset
+    // (the built-in ones, then Custom), skipping unavailable ones.
+    function stepPreset(dir) {
+        const list = Presets.list(Chiaki.settings);
+        let ids = list.filter(p => p.available).map(p => p.id);
+        if (root.customPreset() !== null || Presets.current(Chiaki.settings) === "custom")
+            ids.push("custom");
+        if (!ids.length)
+            return;
+        let pos = ids.indexOf(Presets.current(Chiaki.settings));
+        pos = pos < 0 ? (dir > 0 ? 0 : ids.length - 1) : pos + dir;
+        if (pos < 0 || pos >= ids.length)
+            return;
+        root.applySmoothnessPreset(ids[pos]);
+    }
+
     function connectToHost(index) {
         const h = hosts[index];
         if (!h)
@@ -177,8 +193,8 @@ Pane {
     }
     Keys.onUpPressed: moveSelection(-1)
     Keys.onDownPressed: moveSelection(1)
-    Keys.onLeftPressed: moveSelection(-1)
-    Keys.onRightPressed: moveSelection(1)
+    Keys.onLeftPressed: stepPreset(-1)
+    Keys.onRightPressed: stepPreset(1)
     Keys.onMenuPressed: root.showSettingsDialog()
     Keys.onReturnPressed: connectToHost(selectedIndex)
     Keys.onYesPressed: wakeUpHost(selectedIndex)
@@ -544,6 +560,33 @@ Pane {
                                 elide: Text.ElideRight
                             }
 
+                            // Smoothness preset for the next stream
+                            RowLayout {
+                                id: presetPicker
+                                Layout.fillWidth: true
+                                spacing: 16
+                                readonly property var presets: Presets.list(Chiaki.settings)
+                                readonly property string active: Presets.current(Chiaki.settings)
+                                readonly property bool hasCustom: active === "custom" || root.customPreset() !== null
+                                Label {
+                                    text: qsTr("Smoothness")
+                                    font.pixelSize: C.Theme.fontSmall
+                                    color: C.Theme.textSecondary
+                                }
+                                C.Segmented {
+                                    takeFocus: false
+                                    activeFocusOnTab: false
+                                    model: presetPicker.presets.map(p => p.name).concat([qsTr("Custom")])
+                                    enabledSegments: presetPicker.presets.map(p => p.available).concat([presetPicker.hasCustom])
+                                    currentIndex: {
+                                        const i = presetPicker.presets.findIndex(p => p.id === presetPicker.active);
+                                        return i >= 0 ? i : presetPicker.presets.length;
+                                    }
+                                    onActivated: index => root.applySmoothnessPreset(index < presetPicker.presets.length ? presetPicker.presets[index].id : "custom")
+                                }
+                                Item { Layout.fillWidth: true }
+                            }
+
                             Item { Layout.fillHeight: true }
 
                             RowLayout {
@@ -737,7 +780,7 @@ Pane {
                     Layout.fillWidth: true
                     Layout.topMargin: 8
                     wrapMode: Text.Wrap
-                    text: qsTr("↑ ↓ choose a console  ·  Options opens settings")
+                    text: qsTr("↑ ↓ choose a console  ·  ← → smoothness preset  ·  Options opens settings")
                     font.pixelSize: C.Theme.fontCaption
                     color: C.Theme.textDisabled
                 }

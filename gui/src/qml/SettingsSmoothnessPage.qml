@@ -34,20 +34,8 @@ C.SettingsPage {
     }
 
     function applyPreset(preset) {
-        if (!preset.available)
-            return;
-        if (Presets.needsRestart(s, preset.values)) {
-            root.showConfirmDialog(qsTr("Restart needed"),
-                qsTr("Frame generation needs Frame delivery set to Direct Mapping,\nwhich applies after a restart. Switch and restart now?"),
-                () => {
-                    Presets.apply(s, preset.values);
-                    s.directFrameMapping = true;
-                    if (s.restartApplication())
-                        Qt.quit();
-                });
-            return;
-        }
-        Presets.apply(s, preset.values);
+        // Also keeps the current mix as "Custom" (Main.qml)
+        root.applySmoothnessPreset(preset.id);
     }
 
     // Presets: one focus stop, Left/Right choose, Return applies

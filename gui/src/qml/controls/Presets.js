@@ -94,14 +94,25 @@ function currentName(s) {
     return find(s, id).name;
 }
 
+// Every setting a preset touches: "Custom" is a snapshot of these.
+const keys = ["rtxVsrQuality", "frameGenBackend", "frameGenMultiplier", "frameGenVfgChain", "frameGenVfgMode", "nvidiaReflex"];
+
+function snapshot(s) {
+    let v = {};
+    for (const k of keys)
+        v[k] = s[k];
+    return v;
+}
+
 // Frame generation only runs with Direct Mapping, which needs a restart.
 function needsRestart(s, values) {
     return values.frameGenBackend > 0 && !s.directFrameMapping;
 }
 
-function apply(s, values) {
+function apply(s, values, exact) {
     for (const key in values) {
-        if (key === "rtxVsrQuality" && values[key] > 0 && s.rtxVsrQuality > 0)
+        // Keep the user's own RTX Video mode when a preset only wants it on
+        if (!exact && key === "rtxVsrQuality" && values[key] > 0 && s.rtxVsrQuality > 0)
             continue;
         s[key] = values[key];
     }

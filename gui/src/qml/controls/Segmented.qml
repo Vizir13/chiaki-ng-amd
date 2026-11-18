@@ -11,6 +11,8 @@ FocusScope {
     property int currentIndex: 0
     property bool firstInFocusChain: false
     property bool lastInFocusChain: false
+    // Clicking a segment moves the keyboard focus to the control
+    property bool takeFocus: true
     signal activated(int index)
 
     activeFocusOnTab: true
@@ -68,7 +70,8 @@ FocusScope {
                     hoverEnabled: true
                     enabled: seg.usable && control.enabled
                     onClicked: {
-                        control.forceActiveFocus(Qt.MouseFocusReason);
+                        if (control.takeFocus)
+                            control.forceActiveFocus(Qt.MouseFocusReason);
                         if (seg.index !== control.currentIndex)
                             control.activated(seg.index);
                     }
