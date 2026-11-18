@@ -257,3 +257,9 @@ install(TARGETS chiaki
 install(FILES chiaking.desktop DESTINATION share/applications)
 install(FILES chiaking.png DESTINATION share/icons/hicolor/512x512/apps)
 install(FILES io.github.streetpea.Chiaki4deck.appdata.xml DESTINATION share/metainfo)
+
+# Quality / GPU time benchmark of Flow frame generation on recorded frames
+# (see tools/fgbench.cpp). Not built by default: --target chiaki-fgbench.
+add_executable(chiaki-fgbench EXCLUDE_FROM_ALL tools/fgbench.cpp src/flowfg.cpp include/flowfg.h)
+target_include_directories(chiaki-fgbench PRIVATE include)
+target_link_libraries(chiaki-fgbench PkgConfig::LIBPLACEBO Qt::Core Qt::Gui)

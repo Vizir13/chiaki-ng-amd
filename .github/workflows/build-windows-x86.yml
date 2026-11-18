@@ -242,12 +242,13 @@ jobs:
 
       - name: Build chiaki-ng
         run: |
-          cmake --build build --config Release --clean-first --target chiaki
+          cmake --build build --config Release --clean-first --target chiaki chiaki-fgbench
 
       - name: Prepare Qt deployment package
         run: |
           mkdir chiaki-ng-Win
           cp build\gui\chiaki.exe chiaki-ng-Win
+          cp build\gui\chiaki-fgbench.exe chiaki-ng-Win
           cp build\third-party\cpp-steam-tools\cpp-steam-tools.dll chiaki-ng-Win
           cp scripts\qtwebengine_import.qml gui\src\qml\
           # Ship every runtime DLL vcpkg built; names change between vcpkg versions (e.g. lcms2).
