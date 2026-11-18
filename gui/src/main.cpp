@@ -20,6 +20,7 @@ int main(int argc, char *argv[]) { return real_main(argc, argv); }
 #include <discoverymanager.h>
 #include <qmlmainwindow.h>
 #include <QApplication>
+#include <QFontDatabase>
 #include <QtTypes>
 
 #ifdef CHIAKI_ENABLE_CLI
@@ -183,6 +184,10 @@ int real_main(int argc, char *argv[])
 #ifdef Q_OS_WIN
 	installCrashDumps();
 #endif
+	// UI fonts (SIL Open Font License, see res/fonts): Inter for text,
+	// Space Grotesk for headings. Registered before any window exists.
+	QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/Inter.ttf"));
+	QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/SpaceGrotesk.ttf"));
 
 #ifdef Q_OS_MACOS
 	QGuiApplication::setWindowIcon(QIcon(":/icons/chiaking_macos.svg"));
