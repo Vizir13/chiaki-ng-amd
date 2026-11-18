@@ -187,6 +187,10 @@ signals:
     void droppedFramesChanged();
     void videoEnhancementStatusChanged();
     void fpsChanged();
+    // Mouse wheel over the UI, in window coordinates. The offscreen QML
+    // window does not deliver forwarded wheel events, so QML scrolls the
+    // Flickable under the cursor itself (Main.qml).
+    void uiWheel(double x, double y, int angleDelta, int pixelDelta);
     void keepVideoChanged();
     void videoModeChanged();
     void zoomFactorChanged();

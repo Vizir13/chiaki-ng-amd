@@ -8455,6 +8455,10 @@ bool QmlMainWindow::event(QEvent *event)
         if (session && !grab_input)
             return true;
         QGuiApplication::sendEvent(quick_window, event);
+        {
+            const auto *wheel = static_cast<QWheelEvent *>(event);
+            emit uiWheel(wheel->position().x(), wheel->position().y(), wheel->angleDelta().y(), wheel->pixelDelta().y());
+        }
         return true;
     case QEvent::MouseButtonDblClick:
         if(!settings->GetFullscreenDoubleClickEnabled())

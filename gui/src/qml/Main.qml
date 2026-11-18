@@ -1,3 +1,4 @@
+import QtCore
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
@@ -6,6 +7,7 @@ import QtQuick.Controls.Material
 import org.streetpea.chiaking
 
 import "controls" as C
+import "controls/Presets.js" as Presets
 
 Item {
     id: root
@@ -290,6 +292,101 @@ Item {
 
     function showControllerMappingDialog() {
         stack.push(controllerMappingDialogComponent)
+    }
+
+    // Smoothness presets (home screen and Settings > Smoothness). Before a
+    // preset replaces the user's own mix, that mix is kept per profile as
+    // "Custom" so it can be picked again.
+    Settings {
+        id: presetStore
+        location: StandardPaths.writableLocation(StandardPaths.AppConfigLocation) + "/ui-presets.ini"
+        category: "SmoothnessPresets"
+        property string customByProfile: "{}"
+    }
+    function profileKey() {
+        return Chiaki.settings.currentProfile ? Chiaki.settings.currentProfile : "default";
+    }
+    function customPreset() {
+        try {
+            const all = JSON.parse(presetStore.customByProfile);
+            return all[profileKey()] || null;
+        } catch (e) {
+            return null;
+        }
+    }
+    function rememberCustom() {
+        if (Presets.current(Chiaki.settings) !== "custom")
+            return;
+        let all = {};
+        try { all = JSON.parse(presetStore.customByProfile); } catch (e) {}
+        all[profileKey()] = Presets.snapshot(Chiaki.settings);
+        presetStore.customByProfile = JSON.stringify(all);
+    }
+    // id: a preset id from Presets.list() or "custom"
+    function applySmoothnessPreset(id) {
+        const s = Chiaki.settings;
+        let values, exact = false;
+        if (id === "custom") {
+            values = customPreset();
+            exact = true;
+            if (!values || Presets.current(s) === "custom")
+                return;
+        } else {
+            const preset = Presets.find(s, id);
+            if (!preset || !preset.available)
+                return;
+            values = preset.values;
+        }
+        rememberCustom();
+        if (Presets.needsRestart(s, values)) {
+            showConfirmDialog(qsTr("Restart needed"),
+                qsTr("Frame generation needs Frame delivery set to Direct Mapping,\nwhich applies after a restart. Switch and restart now?"),
+                () => {
+                    Presets.apply(s, values, exact);
+                    s.directFrameMapping = true;
+                    if (s.restartApplication())
+                        Qt.quit();
+                });
+            return;
+        }
+        Presets.apply(s, values, exact);
+    }
+
+    // Mouse wheel: scroll the innermost scrollable view under the cursor
+    // (see QmlMainWindow::uiWheel). Wheel-enabled controls (spin boxes etc.)
+    // are not used, so nothing else wants the wheel.
+    function itemAt(x, y) {
+        let item = root;
+        let p = Qt.point(x, y);
+        for (;;) {
+            const child = item.childAt(p.x, p.y);
+            if (!child)
+                return item;
+            p = item.mapToItem(child, p.x, p.y);
+            item = child;
+        }
+    }
+    function scrollAt(x, y, angleDelta, pixelDelta) {
+        const dy = pixelDelta !== 0 ? pixelDelta : angleDelta / 120 * 110;
+        for (let item = itemAt(x, y); item; item = item.parent) {
+            if (item.contentY === undefined || item.contentHeight === undefined || item.interactive === false)
+                continue;
+            const top = item.originY !== undefined ? item.originY : 0;
+            const max = top + Math.max(0, item.contentHeight - item.height);
+            if (max <= top)
+                continue;
+            const next = Math.max(top, Math.min(max, item.contentY - dy));
+            if (next === item.contentY)
+                continue;   // at the end: let an outer view scroll
+            if (item.cancelFlick)
+                item.cancelFlick();
+            item.contentY = next;
+            return;
+        }
+    }
+    Connections {
+        target: Chiaki.window
+        function onUiWheel(x, y, angleDelta, pixelDelta) { root.scrollAt(x, y, angleDelta, pixelDelta) }
     }
 
     Component.onCompleted: {
