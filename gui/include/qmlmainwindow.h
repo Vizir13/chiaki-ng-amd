@@ -407,6 +407,8 @@ private:
     // Frames of the previous stream frame still to be shown while the next
     // one is generated (shown before its frames).
     std::vector<struct pl_frame> fg_carry_frames;
+    // FrameGen::texturesGeneration() the pending / carried frames belong to.
+    uint64_t fg_frames_generation = 0;
     int fg_active_multiplier = 1;
     int fg_active_cadence = 1;
     int fg_last_backend = 0;

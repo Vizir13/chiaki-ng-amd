@@ -220,6 +220,7 @@ struct FrameGen::Impl
     bool ensureImage(FgImage &img, int w, int h, pl_fmt fmt, bool renderable, bool clearable);
     void destroyImage(FgImage &img);
     void destroyImages();
+    uint64_t textures_generation = 0;
     bool ensureSize(int w, int h, const std::function<void(const char *)> &trace);
     bool fillConstant(FgImage &img, const float value[4], const void *texel, size_t texel_size);
     bool hold(FgImage &img);
@@ -427,6 +428,7 @@ void FrameGen::Impl::destroyImage(FgImage &img)
 
 void FrameGen::Impl::destroyImages()
 {
+    textures_generation++;
     for (auto &set : sets) {
         destroyImage(set.real);
         for (auto &img : set.generated)
@@ -1353,6 +1355,11 @@ void FrameGen::reset()
     impl->reset_pending = true;
 }
 
+uint64_t FrameGen::texturesGeneration() const
+{
+    return impl->textures_generation;
+}
+
 void FrameGen::setFlowHighQuality(bool high)
 {
     impl->flow_high_quality = high;
@@ -2102,6 +2109,7 @@ int FrameGen::maxMultiplier() const { return 1; }
 float FrameGen::gpuTimeMs() const { return 0.0f; }
 QString FrameGen::takeTimingSummary() { return QString(); }
 void FrameGen::reset() {}
+uint64_t FrameGen::texturesGeneration() const { return 0; }
 void FrameGen::setFlowHighQuality(bool) {}
 void FrameGen::setDlssMotion(int) {}
 void FrameGen::setVfgMode(int) {}

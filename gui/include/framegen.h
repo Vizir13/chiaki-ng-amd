@@ -7,6 +7,7 @@
 #include <QString>
 
 #include <memory>
+#include <cstdint>
 #include <vector>
 
 // Frame generation (interpolation) for the video stream on libplacebo's
@@ -64,6 +65,11 @@ public:
 
     // The next frame starts a new sequence: nothing is interpolated across it.
     void reset();
+
+    // Changes whenever the textures of returned frames are destroyed (e.g.
+    // process() at another output size): frames from an earlier value must
+    // not be rendered any more.
+    uint64_t texturesGeneration() const;
 
     // Flow backend only: analyse motion at 1/2 instead of 1/4 resolution.
     void setFlowHighQuality(bool high);

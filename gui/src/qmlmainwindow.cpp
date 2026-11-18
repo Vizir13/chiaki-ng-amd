@@ -7068,6 +7068,15 @@ void QmlMainWindow::render()
     struct pl_frame fg_override_frame = {};
     bool fg_override = false;
     bool direct_frame_fresh = false;
+    // Generated frames whose textures frame generation has destroyed since
+    // (it rebuilds them at another size) must not be rendered: that passed
+    // freed images to the driver and crashed it, e.g. leaving fullscreen.
+    if (frame_gen && fg_frames_generation != frame_gen->texturesGeneration() &&
+        (!fg_pending_frames.empty() || !fg_carry_frames.empty())) {
+        fg_dropped_count += static_cast<qint64>(fg_pending_frames.size() + fg_carry_frames.size());
+        fg_pending_frames.clear();
+        fg_carry_frames.clear();
+    }
     if (bypass_frame_queue && !fg_pending_frames.empty()) {
         bool incoming_waiting = false;
         {
@@ -8108,6 +8117,12 @@ void QmlMainWindow::render()
                     QFile::remove(frameGenCrashGuardPath());
                     fg_crash_guard_armed = false;
                 }
+                if (!fg_carry_frames.empty() && fg_frames_generation != frame_gen->texturesGeneration()) {
+                    // process() rebuilt the textures they use: drop them.
+                    fg_dropped_count += static_cast<qint64>(fg_carry_frames.size());
+                    fg_carry_frames.clear();
+                }
+                fg_frames_generation = frame_gen->texturesGeneration();
                 if (!fg_carry_frames.empty()) {
                     // The previous stream frame's remaining frames go first.
                     fg_shown_count += static_cast<qint64>(fg_carry_frames.size()) - 1;
