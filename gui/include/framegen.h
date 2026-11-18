@@ -71,6 +71,13 @@ public:
     // Clean-up of the generated frames (see fgfixup.h): 0 off, 1 static
     // content (HUD, text) only, 2 static content and fine detail (default).
     void setCleanup(int mode);
+    // NVIDIA VFG 2x followed by DLSS Frame Generation 2x (4 frames per stream
+    // frame); used when the multiplier is 4 and the VFG backend is active.
+    void setVfgChain(bool enabled);
+    // Whether the last process() call used it.
+    bool vfgChainActive() const;
+    // Compiled in (NGX) and not failed.
+    bool vfgChainUsable() const;
 
     // Waits for in-flight work and releases every Vulkan and backend resource.
     // Must be called before the pl_vulkan device is destroyed.
@@ -89,6 +96,7 @@ public:
 private:
     bool processFrames(const struct pl_frame *src, int out_w, int out_h, int multiplier,
                        float frame_interval_ms, std::vector<struct pl_frame> &outputs);
+    void fixupFrames(pl_tex prev, std::vector<struct pl_frame> &outputs);
 
     std::unique_ptr<Impl> impl;
 };

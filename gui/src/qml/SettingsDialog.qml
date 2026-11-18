@@ -1188,6 +1188,29 @@ DialogView {
 
                     Label {
                         Layout.alignment: Qt.AlignRight
+                        visible: Chiaki.settings.frameGenVfgSupported && Chiaki.settings.frameGenDlssSupported
+                        text: qsTr("NVIDIA VFG Second Stage:")
+                    }
+
+                    C.ComboBox {
+                        Layout.preferredWidth: 400
+                        visible: Chiaki.settings.frameGenVfgSupported && Chiaki.settings.frameGenDlssSupported
+                        enabled: Chiaki.settings.frameGenBackend === 4
+                        model: [qsTr("Off"), qsTr("DLSS Frame Generation 2x (VFG 2x + DLSS 2x = 4x)")]
+                        currentIndex: Chiaki.settings.frameGenVfgChain ? 1 : 0
+                        onActivated: index => Chiaki.settings.frameGenVfgChain = index === 1
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("VFG makes one frame between the stream frames, then DLSS Frame Generation (RTX 40/50) doubles that sequence again: 4 frames per stream frame for much less GPU time than VFG 4x, at the cost of some DLSS artifacts on UI. Needs a display at 4x the stream frame rate (e.g. 120 Hz for 30 fps); the multiplier setting is ignored.")
+                    }
+
+                    Label {
+                        Layout.alignment: Qt.AlignRight
+                        visible: Chiaki.settings.frameGenVfgSupported && Chiaki.settings.frameGenDlssSupported
+                        text: qsTr("(Off)")
+                    }
+
+                    Label {
+                        Layout.alignment: Qt.AlignRight
                         visible: Chiaki.settings.frameGenVfgSupported
                         text: qsTr("NVIDIA Runtime:")
                     }

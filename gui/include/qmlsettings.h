@@ -116,6 +116,7 @@ class QmlSettings : public QObject
 	Q_PROPERTY(QString frameGenVfgRuntime READ frameGenVfgRuntime NOTIFY frameGenVfgRuntimeChanged)
 	Q_PROPERTY(int vfgRuntimeDownloadState READ vfgRuntimeDownloadState NOTIFY vfgRuntimeDownloadStateChanged)
 	Q_PROPERTY(int frameGenVfgMode READ frameGenVfgMode WRITE setFrameGenVfgMode NOTIFY frameGenVfgModeChanged)
+	Q_PROPERTY(bool frameGenVfgChain READ frameGenVfgChain WRITE setFrameGenVfgChain NOTIFY frameGenVfgChainChanged)
 	Q_PROPERTY(bool ambientBorder READ ambientBorder WRITE setAmbientBorder NOTIFY ambientBorderChanged)
 	Q_PROPERTY(int rcasStrength READ rcasStrength WRITE setRcasStrength NOTIFY rcasStrengthChanged)
 	Q_PROPERTY(bool ambientBorderSupported READ ambientBorderSupported CONSTANT)
@@ -397,6 +398,8 @@ public:
     Q_INVOKABLE void downloadVfgRuntime();
     int frameGenVfgMode() const;
     void setFrameGenVfgMode(int mode);
+    bool frameGenVfgChain() const;
+    void setFrameGenVfgChain(bool enabled);
     bool ambientBorder() const;
     int rcasStrength() const;
     void setRcasStrength(int strength);
@@ -677,6 +680,7 @@ signals:
     void frameGenDlssMotionChanged();
     void frameGenCleanupChanged();
     void frameGenVfgModeChanged();
+    void frameGenVfgChainChanged();
     void frameGenVfgRuntimeChanged();
     void vfgRuntimeDownloadStateChanged();
     void ambientBorderChanged();

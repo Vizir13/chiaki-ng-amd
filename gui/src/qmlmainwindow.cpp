@@ -5527,7 +5527,8 @@ renderer_backend_ready:
             QString part = fg_backend_status == static_cast<int>(FrameGen::Backend::Dlss) ? QStringLiteral("DLSS FG")
                 : fg_backend_status == static_cast<int>(FrameGen::Backend::Flow)
                     ? (this->settings && this->settings->GetFrameGenFlowHighQuality() ? QStringLiteral("Flow FG HQ") : QStringLiteral("Flow FG"))
-                : fg_backend_status == static_cast<int>(FrameGen::Backend::Vfg) ? QStringLiteral("NVIDIA VFG")
+                : fg_backend_status == static_cast<int>(FrameGen::Backend::Vfg)
+                    ? (frame_gen->vfgChainActive() ? QStringLiteral("NVIDIA VFG + DLSS FG") : QStringLiteral("NVIDIA VFG"))
                 : QStringLiteral("FSR FG");
             const int multiplier = fg_status_multiplier.loadRelaxed();
             if (multiplier > 1) {
@@ -7911,6 +7912,13 @@ void QmlMainWindow::render()
             ? static_cast<int>(std::floor(refresh_rate * source_interval_s + 0.15))
             : 2;
         int multiplier = qMin(settings->GetFrameGenMultiplier() * cadence, refresh_cap);
+        // NVIDIA VFG 2x + DLSS FG 2x always makes 4 frames per source picture.
+        const bool vfg_chain = backend_choice == FrameGen::Backend::Vfg && settings->GetFrameGenVfgChain()
+                               && FrameGen::backendCompiledIn(FrameGen::Backend::Dlss) && frame_gen->vfgChainUsable()
+                               && refresh_cap >= 4;
+        if (vfg_chain)
+            multiplier = 4;
+        frame_gen->setVfgChain(vfg_chain);
         fg_refresh_limited = multiplier < 2;
         if (fg_refresh_limited && fg_skip_logged != 3) {
             fg_skip_logged = 3;
@@ -8129,6 +8137,13 @@ bool QmlMainWindow::event(QEvent *event)
         }
         QGuiApplication::sendEvent(quick_window, event);
         break;
+    case QEvent::Wheel:
+        // The QML UI (settings, dialogs, menus) scrolls with the wheel; it
+        // was never forwarded, so Flickables only moved by dragging.
+        if (session && !grab_input)
+            return true;
+        QGuiApplication::sendEvent(quick_window, event);
+        return true;
     case QEvent::MouseButtonDblClick:
         if(!settings->GetFullscreenDoubleClickEnabled())
             break;

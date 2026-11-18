@@ -1185,6 +1185,19 @@ void QmlSettings::setFrameGenVfgMode(int mode)
     emit frameGenVfgModeChanged();
 }
 
+bool QmlSettings::frameGenVfgChain() const
+{
+    return settings->GetFrameGenVfgChain();
+}
+
+void QmlSettings::setFrameGenVfgChain(bool enabled)
+{
+    if (enabled == settings->GetFrameGenVfgChain())
+        return;
+    settings->SetFrameGenVfgChain(enabled);
+    emit frameGenVfgChainChanged();
+}
+
 int QmlSettings::rcasStrength() const
 {
     return settings->GetRcasStrength();

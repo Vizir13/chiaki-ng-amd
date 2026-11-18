@@ -563,6 +563,9 @@ class Settings : public QObject
 		// NVIDIA VFG model quality: 0 Low, 1 Medium, 2 High.
 		int GetFrameGenVfgMode() const { return qBound(0, settings.value("settings/frame_gen_vfg_mode", 2).toInt(), 2); }
 		void SetFrameGenVfgMode(int mode) { settings.setValue("settings/frame_gen_vfg_mode", qBound(0, mode, 2)); }
+		// NVIDIA VFG 2x followed by DLSS Frame Generation 2x (4x in total).
+		bool GetFrameGenVfgChain() const { return settings.value("settings/frame_gen_vfg_chain", false).toBool(); }
+		void SetFrameGenVfgChain(bool enabled) { settings.setValue("settings/frame_gen_vfg_chain", enabled); }
 		// DLSS Frame Generation motion vectors: 0 = zero motion, 1 = Flow's motion search,
 		// 2 = Flow's motion search with the opposite sign (to compare the conventions).
 		int GetFrameGenDlssMotion() const { return qBound(0, settings.value("settings/frame_gen_dlss_motion", 1).toInt(), 2); }

@@ -57,7 +57,8 @@ constexpr VkImageLayout kLayout = VK_IMAGE_LAYOUT_GENERAL;
 // is presented last, up to one stream frame interval after its call.
 constexpr size_t kFrameSets = 3;
 constexpr int kMaxGenerated = 3;
-constexpr size_t kCommandSlots = 4;
+// NVIDIA VFG + DLSS FG uses up to five submissions per stream frame.
+constexpr size_t kCommandSlots = 8;
 constexpr uint64_t kWaitTimeoutNs = 2000000000ull;
 // Video has no depth; a constant mid-range value keeps disocclusion logic neutral.
 constexpr float kConstantDepth = 0.5f;
@@ -161,6 +162,20 @@ struct FrameGen::Impl
     std::unique_ptr<FgFixup> fixup;
     bool fixup_failed = false;
     bool fixup_logged = false;
+    // NVIDIA VFG 2x followed by DLSS Frame Generation 2x on the resulting
+    // 2x sequence (4 frames per stream frame); see runVfgChain().
+    bool vfg_chain = false;
+    bool vfg_chain_active = false;
+    std::unique_ptr<FgBackendImpl> chain_impl;
+    bool chain_failed = false;
+    bool chain_logged = false;
+    // Last frame handed to the second stage (DLSS keeps it as its history).
+    FgImage *chain_last = nullptr;
+    std::array<std::array<FgImage, 2>, kFrameSets> chain_out;
+    size_t chain_set = 0;
+    // Runs one backend record for `color` -> `out` in its own submission.
+    bool runSingle(FgBackendImpl *impl, FgImage &color, FgImage &out, bool reset, float frame_interval_ms,
+                   bool *crashed);
     // NVIDIA VFG: model quality and which shared input buffer gets the next frame.
     int vfg_mode = 2;
     int vfg_parity = 0;
@@ -385,10 +400,15 @@ void FrameGen::Impl::destroyImages()
         for (auto &img : set.generated)
             destroyImage(img);
     }
+    for (auto &pair : chain_out) {
+        for (auto &img : pair)
+            destroyImage(img);
+    }
     destroyImage(mvec);
     destroyImage(depth);
     width = height = 0;
     last_real = nullptr;
+    chain_last = nullptr;
 }
 
 bool FrameGen::Impl::fillConstant(FgImage &img, const float value[4], const void *texel, size_t texel_size)
@@ -426,6 +446,8 @@ bool FrameGen::Impl::ensureSize(int w, int h, const std::function<void(const cha
         return false;
     if (backend_impl)
         backend_impl->invalidate();
+    if (chain_impl)
+        chain_impl->invalidate();
     destroyImages();
 
     for (auto &set : sets) {
@@ -555,11 +577,18 @@ void FrameGen::Impl::fillFrame(const FgImage &img, struct pl_frame *frame)
 
 void FrameGen::Impl::destroyBackend()
 {
-    if (backend_impl) {
+    if (backend_impl || chain_impl)
         waitDone(done_value);
+    if (backend_impl) {
         backend_impl->shutdown();
         backend_impl.reset();
     }
+    if (chain_impl) {
+        chain_impl->shutdown();
+        chain_impl.reset();
+    }
+    chain_last = nullptr;
+    vfg_chain_active = false;
     backend = FrameGen::Backend::None;
     have_history = false;
 }
@@ -800,6 +829,7 @@ private:
 };
 
 } // namespace
+
 
 #endif // CHIAKI_HAVE_NGX
 
@@ -1279,6 +1309,25 @@ void FrameGen::setDlssMotion(int mode)
     impl->dlss_motion_reversed = reversed;
 }
 
+void FrameGen::setVfgChain(bool enabled)
+{
+    impl->vfg_chain = enabled;
+}
+
+bool FrameGen::vfgChainActive() const
+{
+    return impl->vfg_chain_active;
+}
+
+bool FrameGen::vfgChainUsable() const
+{
+#if defined(CHIAKI_HAVE_NGX)
+    return !impl->chain_failed;
+#else
+    return false;
+#endif
+}
+
 void FrameGen::setCleanup(int mode)
 {
     mode = std::clamp(mode, 0, 2);
@@ -1461,17 +1510,191 @@ bool FrameGen::Impl::processVfg(FrameSet &set, int count, std::vector<struct pl_
     return true;
 }
 
+bool FrameGen::Impl::runSingle(FgBackendImpl *impl, FgImage &color, FgImage &out, bool reset, float frame_interval_ms,
+                               bool *crashed)
+{
+    *crashed = false;
+    const uint32_t slot_index = static_cast<uint32_t>(next_slot);
+    CommandSlot &slot = cmd_slots[next_slot];
+    next_slot = (next_slot + 1) % cmd_slots.size();
+    if (!waitDone(slot.done_value))
+        return false;
+    timer.collect(slot_index);
+    std::array<FgImage *, 4> held = {};
+    size_t num_held = 0;
+    bool ok = true;
+    for (FgImage *img : { &color, &mvec, &depth, &out }) {
+        if (ok && hold(*img))
+            held[num_held++] = img;
+        else
+            ok = false;
+    }
+    if (ok)
+        ok = vkResetCommandBuffer(slot.cmd, 0) == VK_SUCCESS;
+    if (ok) {
+        VkCommandBufferBeginInfo begin_info = {};
+        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        ok = vkBeginCommandBuffer(slot.cmd, &begin_info) == VK_SUCCESS;
+        if (ok) {
+            unsigned long seh_code = 0;
+            FgImage *outputs[] = { &out };
+            {
+                // The runtimes may submit to libplacebo's queues themselves.
+                VkQueuesLock queues_lock(vk);
+                ok = guardedCall([&]() {
+                    return impl->record(*this, slot.cmd, color, outputs, 1, reset, frame_interval_ms);
+                }, &seh_code);
+            }
+            if (seh_code) {
+                qCCritical(chiakiGui).nospace() << "[framegen] DLSS Frame Generation (second stage) crashed inside its runtime (exception 0x"
+                                                << Qt::hex << seh_code << Qt::dec << ", in " << impl->stage() << ")";
+                *crashed = true;
+                ok = false;
+            }
+            ok = vkEndCommandBuffer(slot.cmd) == VK_SUCCESS && ok;
+        }
+    }
+    ok = ok && submit(slot.cmd, held.data(), num_held);
+    if (ok)
+        slot.done_value = done_value;
+    for (size_t i = 0; i < num_held; i++) {
+        if (ok)
+            release(*held[i], sem_done, done_value);
+        else
+            release(*held[i], held[i]->sem, held[i]->value);
+    }
+    return ok;
+}
+
+// NVIDIA VFG 2x + DLSS Frame Generation 2x: the frames of the first stage
+// (VFG's in-between frame, then the real one) are fed to DLSS Frame
+// Generation as if they were rendered frames, so it inserts one frame
+// between each consecutive pair: [D(last, V), V, D(V, real), real]. DLSS
+// gets Flow's motion vectors for each pair; the motion between them is half
+// of what a plain 2x of the stream sees.
+static bool runVfgChain(FrameGen::Impl &d, std::vector<struct pl_frame> &outputs, float frame_interval_ms)
+{
+#if defined(CHIAKI_HAVE_NGX)
+    auto fail = [&d](const char *why) {
+        qCWarning(chiakiGui) << "[framegen] NVIDIA VFG + DLSS FG:" << why << "- using NVIDIA VFG alone";
+        d.chain_failed = true;
+        d.chain_last = nullptr;
+        return false;
+    };
+    if (!d.chain_impl) {
+        auto impl = std::make_unique<DlssBackend>();
+        if (!impl->init(d)) {
+            impl->shutdown();
+            return fail("DLSS Frame Generation is unavailable");
+        }
+        d.chain_impl = std::move(impl);
+    }
+    if (!d.motion_flow && !d.motion_flow_failed) {
+        d.motion_flow = std::make_unique<FlowInterpolator>(d.log, d.gpu);
+        if (!d.motion_flow->init()) {
+            d.motion_flow.reset();
+            d.motion_flow_failed = true;
+        }
+    }
+    if (d.motion_flow)
+        d.motion_flow->setAnalysisScale(d.flow_high_quality ? 2 : 4);
+    auto &out = d.chain_out[d.chain_set];
+    d.chain_set = (d.chain_set + 1) % d.chain_out.size();
+    for (auto &img : out) {
+        if (!d.ensureImage(img, d.width, d.height, d.fmt_color, true, false))
+            return fail("could not allocate its textures");
+    }
+    // The first stage's frames, by texture.
+    auto find = [&d](pl_tex tex) -> FgImage * {
+        for (auto &set : d.sets) {
+            if (set.real.tex == tex)
+                return &set.real;
+            for (auto &img : set.generated) {
+                if (img.tex == tex)
+                    return &img;
+            }
+        }
+        return nullptr;
+    };
+    std::vector<struct pl_frame> result;
+    size_t used = 0;
+    for (const struct pl_frame &frame : outputs) {
+        FgImage *x = find(frame.planes[0].texture);
+        if (!x)
+            return fail("unknown first stage frame");
+        const bool reset = !d.chain_last;
+        bool written = false;
+        if (d.motion_flow && !d.motion_flow->motionVectors(reset ? nullptr : d.chain_last->tex, x->tex, d.mvec.tex, &written)) {
+            d.motion_flow.reset();
+            d.motion_flow_failed = true;
+            written = false;
+        }
+        d.mvecs_from_flow = written;
+        if (written)
+            d.mvec_dirty = true;
+        // A reset call only gives DLSS its history; its output is not shown.
+        FgImage &target = out[std::min<size_t>(used, out.size() - 1)];
+        bool crashed = false;
+        if (!d.runSingle(d.chain_impl.get(), *x, target, reset, frame_interval_ms, &crashed)) {
+            if (crashed) {
+                // Its state is unknown: leak it rather than call into it again.
+                (void)d.chain_impl.release();
+                d.chain_failed = true;
+                d.chain_last = nullptr;
+                return false;
+            }
+            return fail("evaluating DLSS Frame Generation failed");
+        }
+        if (!reset && used < out.size()) {
+            if (d.fixup && d.cleanup_mode > 0 && !d.fixup_failed)
+                d.fixup->after(d.chain_last->tex, x->tex, written ? d.mvec.tex : nullptr, target.tex, 0.5f,
+                               d.cleanup_mode >= 2, true);
+            result.emplace_back();
+            FrameGen::Impl::fillFrame(target, &result.back());
+            used++;
+        }
+        result.push_back(frame);
+        d.chain_last = x;
+    }
+    outputs.swap(result);
+    if (!d.chain_logged) {
+        d.chain_logged = true;
+        qCInfo(chiakiGui) << "[framegen] NVIDIA VFG 2x + DLSS Frame Generation 2x active";
+    }
+    return true;
+#else
+    (void)d;
+    (void)outputs;
+    (void)frame_interval_ms;
+    return false;
+#endif
+}
+
 bool FrameGen::process(const struct pl_frame *src, int out_w, int out_h, int multiplier,
                        float frame_interval_ms, std::vector<struct pl_frame> &outputs)
 {
     Impl &d = *impl;
     // The previous real frame, before processFrames() moves on.
     pl_tex prev = (d.reset_pending || !d.have_history || !d.last_real) ? nullptr : d.last_real->tex;
-    if (!processFrames(src, out_w, out_h, multiplier, frame_interval_ms, outputs))
+    const bool chain = d.vfg_chain && !d.chain_failed && d.backend == FrameGen::Backend::Vfg && multiplier >= 4;
+    if (!processFrames(src, out_w, out_h, chain ? 2 : multiplier, frame_interval_ms, outputs))
         return false;
+    d.vfg_chain_active = false;
+    if (!prev)
+        d.chain_last = nullptr;
+    fixupFrames(prev, outputs);
+    if (chain && d.backend == FrameGen::Backend::Vfg)
+        d.vfg_chain_active = runVfgChain(d, outputs, frame_interval_ms * 0.5f);
+    return true;
+}
+
+void FrameGen::fixupFrames(pl_tex prev, std::vector<struct pl_frame> &outputs)
+{
+    Impl &d = *impl;
     const size_t generated = outputs.size() > 1 ? outputs.size() - 1 : 0;
     if (!generated || !prev || !d.fixup || d.cleanup_mode <= 0 || d.fixup_failed)
-        return true;
+        return;
     pl_tex cur = outputs.back().planes[0].texture;
     // DLSS with zero motion keeps its motion texture at zero: no detail pass.
     pl_tex motion = d.mvecs_from_flow ? d.mvec.tex : nullptr;
@@ -1493,7 +1716,6 @@ bool FrameGen::process(const struct pl_frame *src, int out_w, int out_h, int mul
                           << (detail && motion ? "static content + detail" : "static content")
                           << (motion ? "" : "(no motion vectors)");
     }
-    return true;
 }
 
 bool FrameGen::processFrames(const struct pl_frame *src, int out_w, int out_h, int multiplier,
@@ -1783,6 +2005,9 @@ void FrameGen::setFlowHighQuality(bool) {}
 void FrameGen::setDlssMotion(int) {}
 void FrameGen::setVfgMode(int) {}
 void FrameGen::setCleanup(int) {}
+void FrameGen::setVfgChain(bool) {}
+bool FrameGen::vfgChainActive() const { return false; }
+bool FrameGen::vfgChainUsable() const { return false; }
 void FrameGen::destroy() {}
 bool FrameGen::process(const struct pl_frame *, int, int, int, float, std::vector<struct pl_frame> &) { return false; }
 

@@ -91,6 +91,19 @@ chiaki-ng looks for the runtime in `CHIAKI_VFX_PATH`, `<chiaki folder>\vfx`,
 log shows `[framegen] VFG: Video Effects SDK x.y.z from ...` and
 `NVIDIA VFG ready: WxH, quality ...`, or what is missing.
 
+### NVIDIA VFG + DLSS Frame Generation (4x)
+
+**NVIDIA VFG Second Stage = DLSS Frame Generation 2x** runs VFG at 2x and
+feeds the resulting sequence (real, VFG, real, ...) to DLSS Frame Generation,
+which doubles it again: 4 frames per stream frame, e.g. 30 → 120 fps. It costs
+one VFG run plus two DLSS Frame Generation runs per stream frame, far less
+than VFG High at 4x, and DLSS only has to bridge half the motion it would see
+at a plain 2x of the stream. DLSS gets Flow's motion vectors and the clean-up
+passes apply to its frames too. UI elements can show some DLSS artifacts.
+Needs an RTX 40/50 GPU and a display at 4x the stream frame rate; the
+multiplier setting is ignored while it is on. The log shows
+`NVIDIA VFG 2x + DLSS Frame Generation 2x active`.
+
 ### DLSS motion vectors
 
 DLSS Frame Generation is made for games, which hand it per-pixel motion
