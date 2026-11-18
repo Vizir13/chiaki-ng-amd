@@ -34,6 +34,9 @@ bool envOff(const char *name)
 qint64 nowUs() { return static_cast<qint64>(chiaki_time_now_monotonic_us()); }
 
 PFN_vkGetInstanceProcAddr real_gipa = nullptr;
+PFN_vkCreateDevice real_create_device = nullptr;
+VkInstance wrapped_instance = VK_NULL_HANDLE;
+bool gpu_priority_high = false;
 PFN_vkGetDeviceProcAddr real_gdpa = nullptr;
 PFN_vkCreateSwapchainKHR real_create_swapchain = nullptr;
 PFN_vkDestroySwapchainKHR real_destroy_swapchain = nullptr;
@@ -70,7 +73,9 @@ struct PendingPresent {
     VkSwapchainKHR swapchain;
     uint64_t id;
     qint64 present_us;
+    int kind;
 };
+std::atomic<int> next_kind{0};
 std::mutex wait_mutex; // held while waiting on the swapchain
 std::mutex queue_mutex;
 std::condition_variable queue_cv;
@@ -85,6 +90,8 @@ qint64 last_display_us = 0;
 uint64_t last_display_id = 0;
 qint64 interval_sum_us = 0, interval_max_us = 0, interval_count = 0;
 qint64 latency_sum_us = 0, latency_max_us = 0, latency_count = 0;
+// Present -> on screen by kind (generated, real).
+qint64 kind_sum_us[3] = {}, kind_max_us[3] = {}, kind_count[3] = {};
 qint64 refreshes[6] = {}; // frames shown for 1..5, 6+ refreshes
 qint64 timeouts = 0;
 
@@ -109,6 +116,15 @@ void markCurrent(VkLatencyMarkerNV marker, uint64_t id)
 
 void recordDisplay(const PendingPresent &p, qint64 display_us)
 {
+    // CHIAKI_PRESENT_TRACE=<n>: logs n presents (from the 600th on).
+    static const int trace_n = qEnvironmentVariableIntValue("CHIAKI_PRESENT_TRACE");
+    static int traced = 0, seen = 0;
+    if (trace_n > 0 && ++seen > 600 && traced < trace_n) {
+        traced++;
+        qCInfo(chiakiGui).nospace() << "[present-trace] id " << p.id << " kind " << p.kind << " present "
+                                    << p.present_us << " on screen " << display_us << " (+"
+                                    << (display_us - p.present_us) / 1000.0 << " ms)";
+    }
     std::lock_guard<std::mutex> lock(stats_mutex);
     if (last_display_id && p.id == last_display_id + 1 && display_us > last_display_us) {
         const qint64 interval = display_us - last_display_us;
@@ -123,6 +139,11 @@ void recordDisplay(const PendingPresent &p, qint64 display_us)
     const qint64 latency = display_us - p.present_us;
     if (latency >= 0) {
         latency_sum_us += latency;
+        if (p.kind >= 1 && p.kind <= 2) {
+            kind_sum_us[p.kind] += latency;
+            kind_max_us[p.kind] = qMax(kind_max_us[p.kind], latency);
+            kind_count[p.kind]++;
+        }
         latency_max_us = qMax(latency_max_us, latency);
         latency_count++;
     }
@@ -284,7 +305,7 @@ qint64 waitForTarget(qint64 target)
     return nowUs() - begin;
 }
 
-VkResult doPresent(VkQueue q, const VkPresentInfoKHR *info, uint64_t id);
+VkResult doPresent(VkQueue q, const VkPresentInfoKHR *info, uint64_t id, int kind);
 
 // Present thread: scheduled presents wait for their time here, so the
 // render thread goes on with the next stream frame meanwhile (waiting there
@@ -295,6 +316,7 @@ struct PresentJob {
     uint32_t qidx;
     qint64 target;
     uint64_t id;
+    int kind;
     std::vector<VkSemaphore> waits;
     VkSwapchainKHR swapchain;
     uint32_t image;
@@ -302,6 +324,9 @@ struct PresentJob {
     VkFence fence;
 };
 pl_vulkan placebo_vk = nullptr;
+// Graphics queue the present thread presents on (the family's last one).
+VkQueue present_queue = VK_NULL_HANDLE;
+uint32_t present_queue_idx = 0;
 std::mutex present_mutex;
 std::condition_variable present_cv;
 std::deque<PresentJob> present_jobs;
@@ -330,13 +355,22 @@ void runJob(PresentJob &job)
         pi.pNext = &fence_info;
     }
     const uint32_t qf = placebo_vk->queue_graphics.index;
-    placebo_vk->lock_queue(placebo_vk, qf, job.qidx);
+    // A queue of its own: on the renderer's queue the present waited behind
+    // work submitted after the frame (the next stream frame's generated frame
+    // waits there for VFG), so real frames reached the screen ~11 ms late.
+    VkQueue queue = job.queue;
+    uint32_t qidx = job.qidx;
+    if (present_queue != VK_NULL_HANDLE) {
+        queue = present_queue;
+        qidx = present_queue_idx;
+    }
+    placebo_vk->lock_queue(placebo_vk, qf, qidx);
     VkResult res;
     {
         std::lock_guard<std::mutex> sync(swapchain_sync);
-        res = doPresent(job.queue, &pi, job.id);
+        res = doPresent(queue, &pi, job.id, job.kind);
     }
-    placebo_vk->unlock_queue(placebo_vk, qf, job.qidx);
+    placebo_vk->unlock_queue(placebo_vk, qf, qidx);
     if (job.target > 0) {
         if (auto cb = present_done.load())
             cb(job.target, nowUs(), waited);
@@ -441,6 +475,7 @@ bool queueable(const VkPresentInfoKHR *info, bool *has_fence, VkFence *fence)
 VKAPI_ATTR VkResult VKAPI_CALL wrapQueuePresent(VkQueue q, const VkPresentInfoKHR *info)
 {
     const qint64 target = present_target_us.exchange(0);
+    const int kind = next_kind.exchange(0);
     const uint64_t id = present_ids.load() && info->swapchainCount > 0 ? last_present_id.fetch_add(1) + 1 : 0;
     bool has_fence = false;
     VkFence fence = VK_NULL_HANDLE;
@@ -451,6 +486,7 @@ VKAPI_ATTR VkResult VKAPI_CALL wrapQueuePresent(VkQueue q, const VkPresentInfoKH
         job.qidx = static_cast<uint32_t>(qidx);
         job.target = target;
         job.id = id;
+        job.kind = kind;
         job.waits.assign(info->pWaitSemaphores, info->pWaitSemaphores + info->waitSemaphoreCount);
         job.swapchain = info->pSwapchains[0];
         job.image = info->pImageIndices[0];
@@ -470,10 +506,10 @@ VKAPI_ATTR VkResult VKAPI_CALL wrapQueuePresent(VkQueue q, const VkPresentInfoKH
         if (auto cb = present_done.load())
             cb(target, nowUs(), waited);
     }
-    return doPresent(q, info, id);
+    return doPresent(q, info, id, kind);
 }
 
-VkResult doPresent(VkQueue q, const VkPresentInfoKHR *info, uint64_t id)
+VkResult doPresent(VkQueue q, const VkPresentInfoKHR *info, uint64_t id, int kind)
 {
     if (id == 0)
         return real_queue_present(q, info);
@@ -497,7 +533,7 @@ VkResult doPresent(VkQueue q, const VkPresentInfoKHR *info, uint64_t id)
         std::lock_guard<std::mutex> lock(queue_mutex);
         if (queue.size() > 8)
             queue.pop_front();
-        queue.push_back({sc, id, present_us});
+        queue.push_back({sc, id, present_us, kind});
         queue_cv.notify_one();
     }
     return res;
@@ -569,8 +605,66 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL wrapGetDeviceProcAddr(VkDevice dev, con
     return real;
 }
 
+// CHIAKI_GPU_PRIORITY=1: the graphics queues get a high global priority, so
+// presents and final renders could preempt CUDA's VFG work. Opt-in: overlay
+// hooks (RTSS, Overwolf, OBS-style graphics-hook64) crashed in vkCreateDevice
+// with it, and it did not change when real frames reached the screen.
+VKAPI_ATTR VkResult VKAPI_CALL wrapCreateDevice(VkPhysicalDevice phys, const VkDeviceCreateInfo *info,
+                                                const VkAllocationCallbacks *alloc, VkDevice *out)
+{
+    gpu_priority_high = false;
+    bool has_ext = false;
+    for (uint32_t i = 0; i < info->enabledExtensionCount; i++) {
+        if (std::strcmp(info->ppEnabledExtensionNames[i], VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME) == 0 ||
+            std::strcmp(info->ppEnabledExtensionNames[i], VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME) == 0)
+            has_ext = true;
+    }
+    auto get_props = wrapped_instance
+        ? reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
+              real_gipa(wrapped_instance, "vkGetPhysicalDeviceQueueFamilyProperties"))
+        : nullptr;
+    if (has_ext && get_props && qEnvironmentVariableIntValue("CHIAKI_GPU_PRIORITY") == 1) {
+        uint32_t n = 0;
+        get_props(phys, &n, nullptr);
+        std::vector<VkQueueFamilyProperties> props(n);
+        get_props(phys, &n, props.data());
+        std::vector<VkDeviceQueueCreateInfo> queues(info->pQueueCreateInfos,
+                                                    info->pQueueCreateInfos + info->queueCreateInfoCount);
+        std::vector<VkDeviceQueueGlobalPriorityCreateInfoKHR> prio(queues.size());
+        bool any = false;
+        for (size_t i = 0; i < queues.size(); i++) {
+            const uint32_t fam = queues[i].queueFamilyIndex;
+            if (fam >= n || !(props[fam].queueFlags & VK_QUEUE_GRAPHICS_BIT))
+                continue;
+            prio[i] = {};
+            prio[i].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR;
+            prio[i].pNext = queues[i].pNext;
+            prio[i].globalPriority = VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR;
+            queues[i].pNext = &prio[i];
+            any = true;
+        }
+        if (any) {
+            VkDeviceCreateInfo ci = *info;
+            ci.pQueueCreateInfos = queues.data();
+            const VkResult res = real_create_device(phys, &ci, alloc, out);
+            if (res == VK_SUCCESS) {
+                gpu_priority_high = true;
+                return res;
+            }
+            qCInfo(chiakiGui).nospace() << "[reflex] High GPU priority refused (VkResult " << res << ")";
+        }
+    }
+    return real_create_device(phys, info, alloc, out);
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL wrapGetInstanceProcAddr(VkInstance inst, const char *name)
 {
+    if (inst)
+        wrapped_instance = inst;
+    if (name && std::strcmp(name, "vkCreateDevice") == 0) {
+        real_create_device = reinterpret_cast<PFN_vkCreateDevice>(real_gipa(inst, name));
+        return real_create_device ? reinterpret_cast<PFN_vkVoidFunction>(wrapCreateDevice) : nullptr;
+    }
     if (name && std::strcmp(name, "vkGetDeviceProcAddr") == 0) {
         real_gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(real_gipa(inst, name));
         return real_gdpa ? reinterpret_cast<PFN_vkVoidFunction>(wrapGetDeviceProcAddr) : nullptr;
@@ -617,6 +711,8 @@ void appendDeviceExtensions(std::vector<const char *> &dev_extensions)
     if (envOff("CHIAKI_PRESENT_WAIT"))
         return;
     dev_extensions.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+    dev_extensions.push_back(VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME);
+    dev_extensions.push_back(VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME);
     dev_extensions.push_back(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
     if (!envOff("CHIAKI_REFLEX"))
         dev_extensions.push_back(VK_NV_LOW_LATENCY_2_EXTENSION_NAME);
@@ -647,6 +743,26 @@ void onDeviceCreated(pl_vulkan vk)
     present_wait.store(waits && wait_for_present && real_queue_present);
     low_latency.store(latency && set_sleep_mode && set_marker && real_create_swapchain && real_queue_present);
     placebo_vk = vk;
+    present_queue = VK_NULL_HANDLE;
+    // libplacebo creates (and locks) every queue of the family but reports
+    // only the ones it uses (1): take the family's last queue from the driver,
+    // clear of libplacebo (0) and frame generation (1).
+    if (!envOff("CHIAKI_PRESENT_QUEUE")) {
+        auto get_queue = reinterpret_cast<PFN_vkGetDeviceQueue>(real_gdpa(device, "vkGetDeviceQueue"));
+        auto get_props = reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
+            real_gipa(vk->instance, "vkGetPhysicalDeviceQueueFamilyProperties"));
+        uint32_t n = 0;
+        if (get_props)
+            get_props(vk->phys_device, &n, nullptr);
+        std::vector<VkQueueFamilyProperties> props(n);
+        if (n)
+            get_props(vk->phys_device, &n, props.data());
+        const uint32_t fam = vk->queue_graphics.index;
+        if (get_queue && fam < n && props[fam].queueCount >= 3) {
+            present_queue_idx = props[fam].queueCount - 1;
+            get_queue(device, fam, present_queue_idx, &present_queue);
+        }
+    }
     if (real_queue_present && vk->lock_queue && vk->unlock_queue && !envOff("CHIAKI_ASYNC_PRESENT") &&
         !presenter.joinable()) {
         presenter_stop = false;
@@ -660,8 +776,10 @@ void onDeviceCreated(pl_vulkan vk)
     qCInfo(chiakiGui).nospace() << "[reflex] NVIDIA Reflex (VK_NV_low_latency2) "
                                 << (low_latency.load() ? "on" : "off") << ", present ids "
                                 << (present_ids.load() ? "on" : "off") << ", present wait "
-                                << (present_wait.load() ? "on" : "off") << ", present thread "
-                                << (presenter.joinable() ? "on" : "off");
+                                << (present_wait.load() ? "on" : "off") << ", GPU priority "
+                                << (gpu_priority_high ? "high" : "normal") << ", present thread "
+                                << (presenter.joinable() ? "on" : "off") << ", present queue "
+                                << (present_queue != VK_NULL_HANDLE ? static_cast<int>(present_queue_idx) : -1);
 }
 
 void onDeviceDestroyed()
@@ -703,6 +821,11 @@ bool delayNextPresent(qint64 target_us, void (*done)(qint64, qint64, qint64))
 void setLowLatencyEnabled(bool enabled)
 {
     low_latency_wanted.store(enabled);
+}
+
+void setNextPresentKind(int kind)
+{
+    next_kind.store(kind);
 }
 
 void markFrameStart()
@@ -755,9 +878,16 @@ QString takeDisplayStats()
         .arg(refreshes[0]).arg(refreshes[1]).arg(refreshes[2]).arg(refreshes[3]).arg(refreshes[4]).arg(refreshes[5])
         .arg(latency_count ? latency_sum_us / latency_count / 1000.0 : 0.0, 0, 'f', 1)
         .arg(latency_max_us / 1000.0, 0, 'f', 1)
-        .arg(timeouts);
+        .arg(timeouts)
+        + QStringLiteral(", present -> on screen generated %1/%2 ms, real %3/%4 ms")
+        .arg(kind_count[1] ? kind_sum_us[1] / kind_count[1] / 1000.0 : 0.0, 0, 'f', 1)
+        .arg(kind_max_us[1] / 1000.0, 0, 'f', 1)
+        .arg(kind_count[2] ? kind_sum_us[2] / kind_count[2] / 1000.0 : 0.0, 0, 'f', 1)
+        .arg(kind_max_us[2] / 1000.0, 0, 'f', 1);
     interval_sum_us = interval_max_us = interval_count = 0;
     latency_sum_us = latency_max_us = latency_count = 0;
+    for (int k = 0; k < 3; k++)
+        kind_sum_us[k] = kind_max_us[k] = kind_count[k] = 0;
     for (auto &r : refreshes)
         r = 0;
     timeouts = 0;
@@ -775,6 +905,7 @@ const VkPhysicalDeviceFeatures2 *deviceFeatures() { return nullptr; }
 void onDeviceCreated(pl_vulkan) {}
 void onDeviceDestroyed() {}
 void setLowLatencyEnabled(bool) {}
+void setNextPresentKind(int) {}
 void markFrameStart() {}
 void markRenderSubmitted() {}
 void setRefreshRate(double) {}

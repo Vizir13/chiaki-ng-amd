@@ -436,6 +436,12 @@ private:
     size_t fg_late_index = 0;
     // Since when the delay could be lower (0: not).
     qint64 fg_jitter_lower_since_us = 0;
+    // VFG generations waiting to finish: signal value and the time on the
+    // arrival clock they were scheduled from; and how long after that clock
+    // the last generations were ready (what the delay has to cover).
+    std::deque<std::pair<uint64_t, qint64>> fg_ready_pending;
+    std::vector<qint64> fg_ready_history;
+    size_t fg_ready_index = 0;
     // FrameGen::texturesGeneration() the pending / carried frames belong to.
     uint64_t fg_frames_generation = 0;
     int fg_active_multiplier = 1;

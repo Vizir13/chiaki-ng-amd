@@ -43,6 +43,10 @@ void markRenderSubmitted();
 // `done` is called with the target and the time the present went out.
 bool delayNextPresent(qint64 target_us, void (*done)(qint64 target_us, qint64 present_us, qint64 waited_us));
 
+// What the next present shows, for the display stats: 1 a generated
+// frame, 2 a real (stream) frame, 0 unknown.
+void setNextPresentKind(int kind);
+
 // Display period the stats are measured in (refreshes per frame).
 void setRefreshRate(double hz);
 // Time (monotonic us) the last present became visible, when one was seen

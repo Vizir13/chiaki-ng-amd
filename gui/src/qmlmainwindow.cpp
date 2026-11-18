@@ -979,8 +979,16 @@ static qint64 snapPresentToVblank(qint64 target_us, double refresh_rate)
     }
     if (!usable)
         return target_us;
-    // Submit this long before the vblank (CPU and GPU time to the flip).
-    const double margin_us = period_us * 0.6;
+    // Submit this long before the vblank (CPU and GPU time to the flip; the
+    // flip also waits while CUDA's VFG work holds the GPU: at 0.6 of a
+    // refresh about half the real frames still missed their vblank).
+    // CHIAKI_FG_VBLANK_MARGIN: in hundredths of a refresh (10-95).
+    static const double margin_frac = []() {
+        bool ok = false;
+        const int v = qEnvironmentVariableIntValue("CHIAKI_FG_VBLANK_MARGIN", &ok);
+        return ok ? qBound(10, v, 95) / 100.0 : 0.9;
+    }();
+    const double margin_us = period_us * margin_frac;
     const double phase = std::fmod(static_cast<double>(target_us - vblank_us), period_us);
     const double p = phase < 0.0 ? phase + period_us : phase;
     // Shift onto (vblank - margin), the nearest one, keeping the side chosen
@@ -2888,8 +2896,15 @@ QmlMainWindow::QmlMainWindow(const StreamSessionConnectInfo &connect_info)
     init(connect_info.settings);
     backend->createSession(connect_info);
 
-    if (connect_info.fullscreen || connect_info.zoom || connect_info.stretch)
+    if (connect_info.fullscreen || connect_info.zoom || connect_info.stretch) {
         fullscreenTime();
+        // Before the window is shown the state does not stick (the stream
+        // command came up windowed): apply it again once it is on screen.
+        QTimer::singleShot(500, this, [this]() {
+            if (windowState() != Qt::WindowFullScreen)
+                fullscreenTime();
+        });
+    }
     if (connect_info.zoom)
         setVideoMode(VideoMode::Zoom);
     else if (connect_info.stretch)
@@ -6523,7 +6538,10 @@ void QmlMainWindow::createSwapchain()
         present_vsync_enabled = true;
     }
     qCInfo(chiakiGui).nospace()
-        << "[present] swapchain_create vsync_setting=" << (settings->GetVSyncEnabled() ? 1 : 0)
+        << "[present] swapchain_create screen=" << (screen() ? screen()->name() : QString())
+        << " " << (screen() ? screen()->refreshRate() : 0.0) << "Hz window=" << width() << "x" << height()
+        << "@" << devicePixelRatio() << " fullscreen=" << (windowState() == Qt::WindowFullScreen ? 1 : 0)
+        << " vsync_setting=" << (settings->GetVSyncEnabled() ? 1 : 0)
         << " requested_mode=" << (settings->GetVSyncEnabled() ? "FIFO" : "IMMEDIATE")
         << " selected_mode="
         << (swapchain_params.present_mode == VK_PRESENT_MODE_FIFO_KHR ? "FIFO"
@@ -7316,6 +7334,7 @@ void QmlMainWindow::render()
                 fg_present_target_us = fg_pending_targets.front();
                 fg_pending_targets.erase(fg_pending_targets.begin());
             }
+            VkReflex::setNextPresentKind(fg_pending_frames.empty() ? 2 : 1);
             // The last one is the stream frame's real frame.
             if (fg_pending_frames.empty() && fg_pending_arrival_us > 0)
                 fg_time_video_latency.add(static_cast<qint64>(chiaki_time_now_monotonic_us()) - fg_pending_arrival_us);
@@ -7353,7 +7372,7 @@ void QmlMainWindow::render()
                 .arg(fg_repeat_frames.exchange(0))
                 .arg(fg_time_arrival_jitter.take(), fg_time_present_jitter.take(), fg_time_present_late.take())
                 .arg(fg_time_vblank_shift.take());
-            if (fg_drop_log_us && fg_dropped_count + fg_shown_count > 0)
+            if (fg_drop_log_us)
                 qCInfo(chiakiGui).nospace() << "[framegen] Present path in the last "
                     << (now_us - fg_drop_log_us) / 1000 << " ms (avg/max ms): " << present_path;
             // What reached the screen (present wait): at 60 fps on 180 Hz
@@ -8420,6 +8439,27 @@ void QmlMainWindow::render()
                     fg_new_count == 2) {
                     const double make_ms = (vsr_applied && rtx_vsr ? rtx_vsr->gpuTimeMs() : 0.0f) +
                                            frame_gen->gpuTimeMs();
+                    // NVIDIA VFG: how long after the arrival clock the
+                    // generations really were ready. GPU time alone
+                    // undercounts it (CUDA and Vulkan share the GPU): the
+                    // generated frame then went out a refresh late, shown
+                    // 1 refresh and the real one 5.
+                    uint64_t gen_submitted = 0, gen_ready = 0;
+                    int64_t gen_ready_us = 0;
+                    if (frame_gen->generationReady(&gen_submitted, &gen_ready, &gen_ready_us)) {
+                        while (!fg_ready_pending.empty() && fg_ready_pending.front().first <= gen_ready) {
+                            const qint64 need = gen_ready_us - fg_ready_pending.front().second;
+                            if (need > 0 && need < period_us * 2) {
+                                if (fg_ready_history.size() < 300)
+                                    fg_ready_history.push_back(need);
+                                else
+                                    fg_ready_history[fg_ready_index++ % 300] = need;
+                            }
+                            fg_ready_pending.pop_front();
+                        }
+                    } else {
+                        fg_ready_pending.clear();
+                    }
                     // Plus how late stream frames come against the clock: the
                     // 90th percentile of the last ~10 s (3 ms flat let frames
                     // 16-22 ms late through as a skipped beat).
@@ -8430,8 +8470,17 @@ void QmlMainWindow::render()
                         std::nth_element(sorted.begin(), sorted.begin() + k, sorted.end());
                         late_p90_us = qMax<qint64>(2000, sorted[k] + 1000);
                     }
-                    const qint64 needed_us = qBound<qint64>(jitter_floor_us,
-                        static_cast<qint64>(make_ms * 1000.0) + late_p90_us, period_us * 9 / 10);
+                    qint64 needed_raw_us = static_cast<qint64>(make_ms * 1000.0) + late_p90_us;
+                    qint64 ready_p95_us = 0;
+                    if (fg_ready_history.size() >= 30) {
+                        std::vector<qint64> sorted(fg_ready_history);
+                        const size_t k = sorted.size() * 95 / 100;
+                        std::nth_element(sorted.begin(), sorted.begin() + k, sorted.end());
+                        ready_p95_us = sorted[k];
+                        // Ready + the final render and the flip's own margin.
+                        needed_raw_us = ready_p95_us + 2500;
+                    }
+                    const qint64 needed_us = qBound<qint64>(jitter_floor_us, needed_raw_us, period_us * 9 / 10);
                     // Moving the delay moves one present (a visible hitch);
                     // following every swing of the percentile did that every
                     // few seconds. Raise it at once with some headroom, lower
@@ -8461,7 +8510,8 @@ void QmlMainWindow::render()
                     if (new_delay_us != fg_jitter_delay_us) {
                         qCInfo(chiakiGui).nospace() << "[framegen] Jitter buffer delay " << new_delay_us / 1000.0
                             << " ms (VSR + generation GPU " << make_ms << " ms, late arrivals p90 "
-                            << late_p90_us / 1000.0 << " ms)";
+                            << late_p90_us / 1000.0 << " ms, VFG ready p95 " << ready_p95_us / 1000.0
+                            << " ms after the clock)";
                         fg_jitter_delay_us = new_delay_us;
                     }
                     const qint64 jitter_us = fg_jitter_delay_us;
@@ -8494,6 +8544,11 @@ void QmlMainWindow::render()
                         fg_arrival_est_us = predicted_us + error_us / 10;
                     }
                     fg_sched_base_us = fg_arrival_est_us + jitter_us;
+                    if (gen_submitted > 0) {
+                        fg_ready_pending.emplace_back(gen_submitted, fg_arrival_est_us);
+                        if (fg_ready_pending.size() > 16)
+                            fg_ready_pending.pop_front();
+                    }
                     fg_sched_step_us = period_est_us / multiplier;
                     fg_sched_index = 0;
                     for (size_t i = 0; i < fg_new_count; i++)
@@ -8501,6 +8556,8 @@ void QmlMainWindow::render()
                             snapPresentToVblank(fg_sched_base_us + static_cast<qint64>(i) * fg_sched_step_us, refresh_rate);
                 }
                 fg_present_target_us = fg_targets.front();
+                // The first is a generated frame unless one carried over.
+                VkReflex::setNextPresentKind(fg_first_new > 0 ? 0 : (fg_outputs.size() > 1 ? 1 : 2));
                 fg_pending_targets.assign(fg_targets.begin() + 1, fg_targets.end());
                 if (fg_active_multiplier != multiplier || fg_active_cadence != cadence)
                     qCInfo(chiakiGui).nospace() << "Frame generation active: " << FrameGen::backendName(backend_choice)

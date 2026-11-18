@@ -69,6 +69,9 @@ public:
 
     // Average GPU time of the generation per stream frame in milliseconds.
     float gpuTimeMs();
+    // The last signal value whose generation finished on the GPU and when
+    // (monotonic us; seen by a CUDA host callback). False if not measured.
+    bool readyInfo(uint64_t *value, int64_t *ready_us) const;
     // The runtime call in progress, named in the log if the runtime crashes.
     const char *stage() const;
 

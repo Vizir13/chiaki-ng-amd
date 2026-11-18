@@ -1363,6 +1363,17 @@ float FrameGen::gpuTimeMs() const
     return impl->timer.averageMs();
 }
 
+bool FrameGen::generationReady(uint64_t *submitted, uint64_t *ready, int64_t *ready_us) const
+{
+    if (impl->backend != Backend::Vfg || !impl->backend_impl)
+        return false;
+    auto *vfg = static_cast<VfgBackend *>(impl->backend_impl.get());
+    if (!vfg->runner || !vfg->runner->readyInfo(ready, ready_us))
+        return false;
+    *submitted = vfg->runner->lastValue();
+    return true;
+}
+
 int FrameGen::maxMultiplier() const
 {
     return impl->backend_impl ? impl->backend_impl->maxGenerated() + 1 : 1;
@@ -2146,6 +2157,7 @@ FrameGen::Backend FrameGen::backend() const { return Backend::None; }
 bool FrameGen::backendFailed(Backend) const { return true; }
 int FrameGen::maxMultiplier() const { return 1; }
 float FrameGen::gpuTimeMs() const { return 0.0f; }
+bool FrameGen::generationReady(uint64_t *, uint64_t *, int64_t *) const { return false; }
 QString FrameGen::takeTimingSummary() { return QString(); }
 void FrameGen::reset() {}
 uint64_t FrameGen::texturesGeneration() const { return 0; }

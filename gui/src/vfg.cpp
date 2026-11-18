@@ -194,6 +194,10 @@ struct VfgRunner::Impl
     cu::Result (__stdcall *cuStreamCreate)(cu::Stream *, unsigned) = nullptr;
     cu::Result (__stdcall *cuStreamDestroy)(cu::Stream) = nullptr;
     cu::Result (__stdcall *cuStreamSynchronize)(cu::Stream) = nullptr;
+    // Optional: when a generation finished (host callback on the stream).
+    cu::Result (__stdcall *cuLaunchHostFunc)(cu::Stream, void (__stdcall *)(void *), void *) = nullptr;
+    std::atomic<uint64_t> ready_value{0};
+    std::atomic<int64_t> ready_us{0};
     cu::Result (__stdcall *cuImportExternalMemory)(cu::ExternalMemory *, const cu::MemoryHandleDesc *) = nullptr;
     cu::Result (__stdcall *cuExternalMemoryGetMappedBuffer)(cu::DevicePtr *, cu::ExternalMemory, const cu::MemoryBufferDesc *) = nullptr;
     cu::Result (__stdcall *cuDestroyExternalMemory)(cu::ExternalMemory) = nullptr;
@@ -436,6 +440,7 @@ bool VfgRunner::Impl::loadCuda()
     bind(cuEventQuery, "cuEventQuery");
     bind(cuEventElapsedTime, "cuEventElapsedTime");
     bind(cuGetErrorName, "cuGetErrorName");
+    cuLaunchHostFunc = reinterpret_cast<decltype(cuLaunchHostFunc)>(GetProcAddress(cuda_dll, "cuLaunchHostFunc"));
     return ok && cuOk(cuInit(0), "cuInit");
 }
 
@@ -1044,6 +1049,22 @@ bool VfgRunner::Impl::generate(int prev_slot, int cur_slot, int count, uint64_t 
     if (!signalled_ok)
         return false;
     *signalled = true;
+    if (cuLaunchHostFunc) {
+        struct Ready { Impl *impl; uint64_t value; };
+        auto *r = new Ready{this, signal_value};
+        auto cb = [](void *p) {
+            auto *ready = static_cast<Ready *>(p);
+            LARGE_INTEGER f, v;
+            QueryPerformanceFrequency(&f);
+            QueryPerformanceCounter(&v);
+            // Same clock as chiaki_time_now_monotonic_us.
+            ready->impl->ready_us.store(static_cast<int64_t>(v.QuadPart * 1000000 / f.QuadPart));
+            ready->impl->ready_value.store(ready->value);
+            delete ready;
+        };
+        if (cuLaunchHostFunc(d.stream, static_cast<void (__stdcall *)(void *)>(cb), r) != cu::kSuccess)
+            delete r;
+    }
     return ok;
 }
 
@@ -1095,6 +1116,15 @@ float VfgRunner::gpuTimeMs()
     return impl->gpu_ms;
 }
 
+bool VfgRunner::readyInfo(uint64_t *value, int64_t *ready_us) const
+{
+    if (!impl->cuLaunchHostFunc)
+        return false;
+    *ready_us = impl->ready_us.load();
+    *value = impl->ready_value.load();
+    return *ready_us > 0;
+}
+
 const char *VfgRunner::stage() const
 {
     return impl->stage;
@@ -1118,6 +1148,7 @@ void VfgRunner::recordDownload(VkCommandBuffer, VkImage, int) {}
 void VfgRunner::generateAsync(int, int, int, uint64_t, uint64_t) {}
 int VfgRunner::takeStatus(unsigned long *, const char **) { return 0; }
 float VfgRunner::gpuTimeMs() { return 0.0f; }
+bool VfgRunner::readyInfo(uint64_t *, int64_t *) const { return false; }
 const char *VfgRunner::stage() const { return ""; }
 
 #endif // _WIN32

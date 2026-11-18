@@ -60,6 +60,9 @@ public:
     // Average GPU time of the backend's generation work per stream frame in
     // milliseconds (0 if unknown).
     float gpuTimeMs() const;
+    // NVIDIA VFG: the signal value of the last generation submitted, the last
+    // one finished on the GPU and when (monotonic us). False otherwise.
+    bool generationReady(uint64_t *submitted, uint64_t *ready, int64_t *ready_us) const;
     // CPU time process() took since the last call (for the log).
     QString takeTimingSummary();
 
