@@ -422,6 +422,10 @@ private:
     uint64_t fg_batch_counter = 0;
     // Presentation time of the frame the current render shows (0 = untimed).
     int64_t fg_present_target_us = 0;
+    // The queued frame the current render took; put back at the front if the
+    // render does not present (so a real picture is never lost).
+    FgQueuedFrame fg_presenting = {};
+    bool fg_presenting_valid = false;
     int fg_active_multiplier = 1;
     int fg_active_cadence = 1;
     int fg_last_backend = 0;

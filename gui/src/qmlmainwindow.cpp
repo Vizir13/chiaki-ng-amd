@@ -24,6 +24,7 @@ extern "C" {
 }
 
 #include <type_traits>
+#include <cmath>
 #include <QByteArray>
 #include <QPointer>
 #include <QColor>
@@ -7110,6 +7111,7 @@ void QmlMainWindow::render()
     bool fg_override = false;
     bool direct_frame_fresh = false;
     fg_present_target_us = 0;
+    fg_presenting_valid = false;
     if (bypass_frame_queue && !fg_pending_frames.empty()) {
         bool incoming_waiting = false;
         {
@@ -7120,8 +7122,10 @@ void QmlMainWindow::render()
         // queues its frames behind the ones still due, so nothing is dropped);
         // otherwise this render shows the next queued frame at its time.
         if (!incoming_waiting) {
-            fg_override_frame = fg_pending_frames.front().frame;
-            fg_present_target_us = fg_pending_frames.front().target_us;
+            fg_presenting = fg_pending_frames.front();
+            fg_presenting_valid = true;
+            fg_override_frame = fg_presenting.frame;
+            fg_present_target_us = fg_presenting.target_us;
             fg_pending_frames.erase(fg_pending_frames.begin());
             fg_override = true;
         }
@@ -7488,9 +7492,16 @@ void QmlMainWindow::render()
         // (fg_pacer): wait for it here, and keep the interval throttles out.
         const int64_t fg_target_us = present ? fg_present_target_us : 0;
         fg_present_target_us = 0;
+        if (!present && fg_presenting_valid) {
+            // Not presented after all: it is still the next frame due.
+            fg_pending_frames.insert(fg_pending_frames.begin(), fg_presenting);
+        }
+        fg_presenting_valid = false;
         if (fg_target_us > 0) {
             const int64_t submit_lead_us = qBound<int64_t>(0, static_cast<int64_t>(g_submit_swap_est_us.load(std::memory_order_acquire)), 4000);
-            fgWaitUntilUs(fg_target_us - submit_lead_us, [this]() { return ui_priority_update_pending.loadAcquire() != 0; });
+            fgWaitUntilUs(fg_target_us - submit_lead_us, [this]() {
+                return ui_priority_update_pending.loadAcquire() != 0 || stream_session_active.loadAcquire() == 0;
+            });
         }
         const bool use_deferred_swap = present &&
             render_backend == RenderBackend::Vulkan &&
@@ -8108,10 +8119,13 @@ void QmlMainWindow::render()
             // FrameGen reuses its textures every three pictures; frames of an
             // older picture still waiting (only after a stall) are dropped
             // before they could be overwritten.
-            const uint64_t fg_batch = fg_batch_counter++;
-            fg_pending_frames.erase(std::remove_if(fg_pending_frames.begin(), fg_pending_frames.end(),
-                                                   [fg_batch](const FgQueuedFrame &f) { return f.batch + 2 <= fg_batch; }),
-                                    fg_pending_frames.end());
+            // Counted for every call of process(): FrameGen may advance its
+            // set even when it fails, and counting ahead only drops more.
+            const uint64_t fg_batch = multiplier >= 2 ? fg_batch_counter++ : fg_batch_counter;
+            if (multiplier >= 2)
+                fg_pending_frames.erase(std::remove_if(fg_pending_frames.begin(), fg_pending_frames.end(),
+                                                       [fg_batch](const FgQueuedFrame &f) { return f.batch + 2 <= fg_batch; }),
+                                        fg_pending_frames.end());
             if (multiplier >= 2 &&
                 frame_gen->process(&direct_render_frame, fg_out_w, fg_out_h, multiplier,
                                    static_cast<float>(source_interval_s * 1000.0), fg_outputs) &&
@@ -8125,17 +8139,33 @@ void QmlMainWindow::render()
                 const float gpu_ms = frame_gen->gpuTimeMs();
                 const int64_t period_us = static_cast<int64_t>(std::llround(source_interval_s * 1000000.0));
                 const int64_t gpu_lead_us = static_cast<int64_t>(gpu_ms * 1000.0f) + 1000;
-                std::vector<int64_t> fg_targets(fg_outputs.size());
-                fg_pacer.schedule(static_cast<int64_t>(chiaki_time_now_monotonic_us()), period_us,
-                                  static_cast<int>(fg_outputs.size()), gpu_lead_us, fg_targets.data());
+                std::vector<int64_t> fg_targets(fg_outputs.size(), 0);
+                if (period_us > 0) {
+                    const int count = static_cast<int>(fg_outputs.size());
+                    fg_pacer.schedule(static_cast<int64_t>(chiaki_time_now_monotonic_us()), period_us,
+                                      count, gpu_lead_us, fg_targets.data());
+                    // After a resync the clock may restart before frames still
+                    // queued: keep the presentation times increasing.
+                    if (!fg_pending_frames.empty()) {
+                        const int64_t earliest = fg_pending_frames.back().target_us + period_us / count;
+                        if (fg_targets[0] < earliest) {
+                            const int64_t shift = earliest - fg_targets[0];
+                            for (int64_t &t : fg_targets)
+                                t += shift;
+                        }
+                    }
+                }
+                // Unknown stream rate: untimed, presented as rendered.
                 for (size_t i = 0; i < fg_outputs.size(); i++)
                     fg_pending_frames.push_back({ fg_outputs[i], fg_targets[i], fg_batch });
                 fg_status_gpu_us.storeRelaxed(static_cast<int>(gpu_ms * 1000.0f));
                 fg_status_buffer_us.storeRelaxed(static_cast<int>(fg_pacer.bufferUs()));
                 // This render shows the oldest frame still due (the rest of
                 // the previous picture if any, else this picture's first).
-                direct_render_frame = fg_pending_frames.front().frame;
-                fg_present_target_us = fg_pending_frames.front().target_us;
+                fg_presenting = fg_pending_frames.front();
+                fg_presenting_valid = true;
+                direct_render_frame = fg_presenting.frame;
+                fg_present_target_us = fg_presenting.target_us;
                 fg_pending_frames.erase(fg_pending_frames.begin());
                 if (fg_active_multiplier != multiplier || fg_active_cadence != cadence)
                     qCInfo(chiakiGui).nospace() << "Frame generation active: " << FrameGen::backendName(backend_choice)
