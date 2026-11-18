@@ -929,32 +929,43 @@ static qint64 snapPresentToVblank(qint64 target_us, double refresh_rate)
     }();
     if (!enabled || target_us <= 0 || refresh_rate <= 1.0)
         return target_us;
+    // DWM reports the timing of one display, with several of them not
+    // always the one the window is on (160 and 180 Hz alternated): only its
+    // samples with this display's period count, and the last one is kept.
     static qint64 vblank_us = 0;
     static double period_us = 0.0;
     static qint64 queried_us = 0;
-    static bool usable = false;
+    static qint64 good_sample_us = 0;
     static int logged = -1;
     static double prev_shift_us = 0.0;
     const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
-    if (now_us - queried_us > 250000) {
+    const double display_period_us = 1000000.0 / refresh_rate;
+    if (now_us - queried_us > 100000) {
         queried_us = now_us;
-        usable = false;
         DWM_TIMING_INFO info = {};
         info.cbSize = sizeof(info);
         LARGE_INTEGER freq;
         if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &info)) && QueryPerformanceFrequency(&freq) &&
             freq.QuadPart > 0 && info.qpcRefreshPeriod > 0 && info.qpcVBlank > 0) {
-            // Same conversion as chiaki_time_now_monotonic_us.
-            vblank_us = static_cast<qint64>(info.qpcVBlank * 1000000ull / static_cast<ULONGLONG>(freq.QuadPart));
-            period_us = static_cast<double>(info.qpcRefreshPeriod) * 1000000.0 / static_cast<double>(freq.QuadPart);
-            usable = qAbs(period_us - 1000000.0 / refresh_rate) < period_us * 0.03;
+            const double sample_period_us =
+                static_cast<double>(info.qpcRefreshPeriod) * 1000000.0 / static_cast<double>(freq.QuadPart);
+            if (qAbs(sample_period_us - display_period_us) < display_period_us * 0.01) {
+                // Same conversion as chiaki_time_now_monotonic_us.
+                vblank_us = static_cast<qint64>(info.qpcVBlank * 1000000ull / static_cast<ULONGLONG>(freq.QuadPart));
+                period_us = sample_period_us;
+                good_sample_us = now_us;
+            }
         }
-        if (static_cast<int>(usable) != logged) {
-            logged = static_cast<int>(usable);
-            qCInfo(chiakiGui).nospace() << "[framegen] Present vblank alignment "
-                << (usable ? "on" : "off") << ": DWM refresh period " << period_us / 1000.0
-                << " ms, display " << refresh_rate << " Hz";
-        }
+    }
+    // A slightly wrong period drifts the phase; after a minute without a
+    // sample of this display, give up.
+    const bool usable = good_sample_us > 0 && now_us - good_sample_us < 60000000 &&
+                        qAbs(period_us - display_period_us) < display_period_us * 0.01;
+    if (static_cast<int>(usable) != logged) {
+        logged = static_cast<int>(usable);
+        qCInfo(chiakiGui).nospace() << "[framegen] Present vblank alignment "
+            << (usable ? "on" : "off") << ": refresh period " << period_us / 1000.0
+            << " ms, display " << refresh_rate << " Hz";
     }
     if (!usable)
         return target_us;
@@ -7219,7 +7230,9 @@ void QmlMainWindow::render()
         (!fg_pending_frames.empty() || !fg_carry_frames.empty())) {
         fg_dropped_count += static_cast<qint64>(fg_pending_frames.size() + fg_carry_frames.size());
         fg_pending_frames.clear();
+        fg_pending_targets.clear();
         fg_carry_frames.clear();
+        fg_carry_targets.clear();
     }
     if (bypass_frame_queue && !fg_pending_frames.empty()) {
         bool incoming_waiting = false;
@@ -7236,19 +7249,25 @@ void QmlMainWindow::render()
         // now and show the frames left of this one first (at most the last
         // generated one and the real one; older ones are dropped).
         if (incoming_waiting) {
+            if (fg_pending_targets.size() != fg_pending_frames.size())
+                fg_pending_targets.assign(fg_pending_frames.size(), 0);
             if (fg_pending_frames.size() > 2) {
                 const auto drop = static_cast<std::ptrdiff_t>(fg_pending_frames.size() - 2);
                 fg_dropped_count += drop;
                 fg_pending_frames.erase(fg_pending_frames.begin(), fg_pending_frames.begin() + drop);
+                fg_pending_targets.erase(fg_pending_targets.begin(), fg_pending_targets.begin() + drop);
             }
             fg_carry_frames.assign(fg_pending_frames.begin(), fg_pending_frames.end());
+            fg_carry_targets.assign(fg_pending_targets.begin(), fg_pending_targets.end());
             fg_pending_frames.clear();
+            fg_pending_targets.clear();
         } else {
             fg_override_frame = fg_pending_frames.front();
             fg_pending_frames.erase(fg_pending_frames.begin());
-            if (fg_sched_base_us > 0)
-                fg_present_target_us = snapPresentToVblank(fg_sched_base_us + ++fg_sched_index * fg_sched_step_us,
-                                                           refresh_rate);
+            if (!fg_pending_targets.empty()) {
+                fg_present_target_us = fg_pending_targets.front();
+                fg_pending_targets.erase(fg_pending_targets.begin());
+            }
             // The last one is the stream frame's real frame.
             if (fg_pending_frames.empty() && fg_pending_arrival_us > 0)
                 fg_time_video_latency.add(static_cast<qint64>(chiaki_time_now_monotonic_us()) - fg_pending_arrival_us);
@@ -8208,7 +8227,9 @@ void QmlMainWindow::render()
             !qEnvironmentVariableIsSet("CHIAKI_SWAPCHAIN_DEPTH"))
             swapchain_recreate_pending.storeRelease(1);
         fg_pending_frames.clear();
+        fg_pending_targets.clear();
         fg_carry_frames.clear();
+        fg_carry_targets.clear();
         fg_active_multiplier = 1;
         fg_active_cadence = 1;
         if (frame_gen)
@@ -8292,28 +8313,55 @@ void QmlMainWindow::render()
                     // process() rebuilt the textures they use: drop them.
                     fg_dropped_count += static_cast<qint64>(fg_carry_frames.size());
                     fg_carry_frames.clear();
+                    fg_carry_targets.clear();
                 }
                 fg_frames_generation = frame_gen->texturesGeneration();
+                // Scheduled present time per output (0: regular pacing).
+                std::vector<qint64> fg_targets;
+                const size_t fg_new_count = fg_outputs.size();
                 if (!fg_carry_frames.empty()) {
-                    // The previous stream frame's remaining frames go first.
+                    // The previous stream frame's remaining frames go first,
+                    // each at the time it was scheduled for.
                     fg_shown_count += static_cast<qint64>(fg_carry_frames.size()) - 1;
+                    if (fg_carry_targets.size() == fg_carry_frames.size())
+                        fg_targets = fg_carry_targets;
+                    else
+                        fg_targets.assign(fg_carry_frames.size(), 0);
                     fg_carry_frames.insert(fg_carry_frames.end(), fg_outputs.begin(), fg_outputs.end());
                     fg_outputs.swap(fg_carry_frames);
                     fg_carry_frames.clear();
+                    fg_carry_targets.clear();
                 }
+                const size_t fg_first_new = fg_targets.size();
+                fg_targets.resize(fg_outputs.size(), 0);
                 direct_render_frame = fg_outputs.front();
                 fg_pending_frames.assign(fg_outputs.begin() + 1, fg_outputs.end());
                 fg_pending_arrival_us = direct_frame_arrival_us;
                 // 2x: present this stream frame's frames at a smoothed clock
-                // of the arrivals plus a small delay, so arrival jitter of the
-                // stream (up to the delay) does not reach the screen. Frames
-                // carried over from the previous stream frame keep the
-                // regular pacing.
+                // of the arrivals plus a delay, so arrival jitter of the
+                // stream (up to the delay) does not reach the screen. The
+                // delay must also cover making the generated frame (VSR + VFG
+                // High ~15-18 ms of GPU time): presented before it is done,
+                // it went out late while the real frame was on time, so the
+                // two alternated between short and long on screen.
                 fg_sched_base_us = 0;
-                const qint64 jitter_us = frameGenJitterBufferUs();
+                const qint64 jitter_floor_us = frameGenJitterBufferUs();
                 const qint64 period_us = static_cast<qint64>(llround(source_interval_s * 1000000.0));
-                if (multiplier == 2 && jitter_us > 0 && period_us > 0 && direct_frame_arrival_us > 0 &&
-                    fg_outputs.size() == 2) {
+                if (multiplier == 2 && jitter_floor_us > 0 && period_us > 0 && direct_frame_arrival_us > 0 &&
+                    fg_new_count == 2) {
+                    const double make_ms = (vsr_applied && rtx_vsr ? rtx_vsr->gpuTimeMs() : 0.0f) +
+                                           frame_gen->gpuTimeMs();
+                    const qint64 needed_us = qBound<qint64>(jitter_floor_us,
+                        static_cast<qint64>(make_ms * 1000.0) + 3000, period_us * 3 / 4);
+                    // Moving the delay moves every present once: only on a
+                    // real change.
+                    if (fg_jitter_delay_us == 0 || qAbs(needed_us - fg_jitter_delay_us) > 2000) {
+                        if (fg_jitter_delay_us != 0 || needed_us != jitter_floor_us)
+                            qCInfo(chiakiGui).nospace() << "[framegen] Jitter buffer delay " << needed_us / 1000.0
+                                << " ms (VSR + generation GPU " << make_ms << " ms)";
+                        fg_jitter_delay_us = needed_us;
+                    }
+                    const qint64 jitter_us = fg_jitter_delay_us;
                     // The real period differs from the configured one (console
                     // and PC clocks); with a fixed period the clock settled
                     // ~10x the per-frame difference off (~11 ms seen), which
@@ -8340,8 +8388,12 @@ void QmlMainWindow::render()
                     fg_sched_base_us = fg_arrival_est_us + jitter_us;
                     fg_sched_step_us = period_est_us / multiplier;
                     fg_sched_index = 0;
-                    fg_present_target_us = snapPresentToVblank(fg_sched_base_us, refresh_rate);
+                    for (size_t i = 0; i < fg_new_count; i++)
+                        fg_targets[fg_first_new + i] =
+                            snapPresentToVblank(fg_sched_base_us + static_cast<qint64>(i) * fg_sched_step_us, refresh_rate);
                 }
+                fg_present_target_us = fg_targets.front();
+                fg_pending_targets.assign(fg_targets.begin() + 1, fg_targets.end());
                 if (fg_active_multiplier != multiplier || fg_active_cadence != cadence)
                     qCInfo(chiakiGui).nospace() << "Frame generation active: " << FrameGen::backendName(backend_choice)
                                       << " " << multiplier << "x"
@@ -8356,12 +8408,14 @@ void QmlMainWindow::render()
         // No generation for the new stream frame: its real frame wins.
         fg_dropped_count += static_cast<qint64>(fg_carry_frames.size());
         fg_carry_frames.clear();
+        fg_carry_targets.clear();
     }
     if (direct_frame_fresh && !fg_applied && fg_active_multiplier != 1) {
         qCInfo(chiakiGui) << "Frame generation inactive";
         fg_active_multiplier = 1;
         fg_active_cadence = 1;
         fg_pending_frames.clear();
+        fg_pending_targets.clear();
     }
     if (direct_frame_fresh || !bypass_frame_queue) {
         fg_status_backend.storeRelaxed(stream_active ? fg_backend : 0);

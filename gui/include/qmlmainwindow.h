@@ -425,6 +425,12 @@ private:
     // Frames of the previous stream frame still to be shown while the next
     // one is generated (shown before its frames).
     std::vector<struct pl_frame> fg_carry_frames;
+    // Scheduled present time of each pending / carried frame (0: regular
+    // pacing), kept in step with the frames above.
+    std::vector<qint64> fg_pending_targets;
+    std::vector<qint64> fg_carry_targets;
+    // Jitter buffer delay in use (follows the VSR + generation GPU time).
+    qint64 fg_jitter_delay_us = 0;
     // FrameGen::texturesGeneration() the pending / carried frames belong to.
     uint64_t fg_frames_generation = 0;
     int fg_active_multiplier = 1;
