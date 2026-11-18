@@ -358,6 +358,11 @@ private:
     QString fg_crash_guard_notice;
     // Why frame generation is skipped, logged once per stream (0 = not logged).
     int fg_skip_logged = 0;
+    // Generated frames shown / dropped because the next stream frame was
+    // already waiting (logged every few seconds while it happens).
+    qint64 fg_shown_count = 0;
+    qint64 fg_dropped_count = 0;
+    qint64 fg_drop_log_us = 0;
     QAtomicInteger<int> enhancement_log_reset = 0;
     bool fg_refresh_limited = false;
     QString video_enhancement_status;

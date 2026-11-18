@@ -7012,12 +7012,28 @@ void QmlMainWindow::render()
             // A new stream frame is already waiting: drop the remaining
             // generated frames but still show the real one.
             fg_override_frame = fg_pending_frames.back();
+            fg_dropped_count += static_cast<qint64>(fg_pending_frames.size()) - 1;
             fg_pending_frames.clear();
         } else {
             fg_override_frame = fg_pending_frames.front();
             fg_pending_frames.erase(fg_pending_frames.begin());
+            if (!fg_pending_frames.empty())
+                fg_shown_count++;
         }
         fg_override = true;
+        // The generation (and the frames before it) took too long for the
+        // display rate when generated frames are dropped: report it.
+        const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+        if (now_us - fg_drop_log_us >= 5000000) {
+            if (fg_dropped_count > 0)
+                qCInfo(chiakiGui).nospace() << "[framegen] Generated frames in the last "
+                    << (fg_drop_log_us ? (now_us - fg_drop_log_us) / 1000 : 0) << " ms: " << fg_shown_count
+                    << " shown, " << fg_dropped_count << " dropped (not ready before the next stream frame; GPU "
+                    << (frame_gen ? frame_gen->gpuTimeMs() : 0.0f) << " ms)";
+            fg_drop_log_us = now_us;
+            fg_shown_count = 0;
+            fg_dropped_count = 0;
+        }
     }
     if (bypass_frame_queue && fg_override) {
         direct_render_frame = fg_override_frame;
