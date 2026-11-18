@@ -204,7 +204,7 @@ DialogView {
         }
 
         Item {
-            Dialog {
+            C.Dialog {
                 id: logDialog
                 parent: Overlay.overlay
                 x: Math.round((root.width - width) / 2)

@@ -12,3 +12,4 @@ SettingRow 1.0 SettingRow.qml
 NavItem 1.0 NavItem.qml
 Chip 1.0 Chip.qml
 SettingsPage 1.0 SettingsPage.qml
+Dialog 1.0 Dialog.qml

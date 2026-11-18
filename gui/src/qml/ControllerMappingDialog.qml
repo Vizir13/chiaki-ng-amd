@@ -276,7 +276,7 @@ DialogView {
             }
         }
 
-        Dialog {
+        C.Dialog {
             id: buttonDialog
             property int buttonValue
             property int buttonIndex

@@ -4,7 +4,7 @@ import QtQuick.Controls
 import QtQuick.Controls.Material
 import "controls" as C
 
-Dialog {
+C.Dialog {
     id: dialog
     property alias text: label.text
     property var callback

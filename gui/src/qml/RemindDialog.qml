@@ -6,7 +6,7 @@ import "controls" as C
 
 import org.streetpea.chiaking
 
-Dialog {
+C.Dialog {
     id: dialog
     property alias text: label.text
     property var remotePlay

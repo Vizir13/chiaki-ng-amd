@@ -778,7 +778,7 @@ C.SettingsPage {
         }
     }
 
-    Dialog {
+    C.Dialog {
         id: keyDialog
         focus: false
         property int buttonValue
@@ -824,7 +824,7 @@ C.SettingsPage {
         }
     }
 
-    Dialog {
+    C.Dialog {
         id: controllerMappingDialog
         property bool resetFocus: true
         property bool resetMapping: false
@@ -870,7 +870,7 @@ C.SettingsPage {
         }
     }
 
-    Dialog {
+    C.Dialog {
         id: steamControllerMappingDialog
         property bool resetMapping: false
         parent: Overlay.overlay

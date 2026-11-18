@@ -454,7 +454,7 @@ C.SettingsPage {
         }
     }
 
-    Dialog {
+    C.Dialog {
         id: aboutDialog
         parent: Overlay.overlay
         x: Math.round((root.width - width) / 2)

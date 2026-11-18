@@ -43,6 +43,7 @@
     <file>controls/SettingRow.qml</file>
     <file>controls/NavItem.qml</file>
     <file>controls/Chip.qml</file>
+    <file>controls/Dialog.qml</file>
     <file>controls/SettingsPage.qml</file>
     <file>controls/Presets.js</file>
   </qresource>

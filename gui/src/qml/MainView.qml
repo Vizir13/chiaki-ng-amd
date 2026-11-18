@@ -355,9 +355,9 @@ Pane {
 
             ColumnLayout {
                 id: mainColumn
-                x: 48
+                x: Math.max(48, Math.round((mainFlick.width - width) / 2))
                 y: 40
-                width: Math.min(mainFlick.width - 96, 1500)
+                width: Math.min(mainFlick.width - 96, 2000)
                 spacing: 32
 
                 // Header

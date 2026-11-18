@@ -1227,7 +1227,7 @@ Item {
         }
     }
 
-    Dialog {
+    C.Dialog {
         id: sessionPinDialog
         parent: Overlay.overlay
         x: Math.round((root.width - width) / 2)

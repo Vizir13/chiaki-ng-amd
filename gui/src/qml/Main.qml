@@ -555,7 +555,7 @@ Item {
         }
     }
 
-    Dialog {
+    C.Dialog {
         id: infoDialog
         property alias text: infoDialogLabel.text
         property Item restoreFocusItem

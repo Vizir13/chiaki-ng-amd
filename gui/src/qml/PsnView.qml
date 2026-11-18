@@ -4,6 +4,8 @@ import QtQuick.Controls.Material
 
 import org.streetpea.chiaking
 
+import "controls" as C
+
 Rectangle {
     id: view
     property bool allowClose: false
@@ -137,7 +139,7 @@ Rectangle {
         onTriggered: root.showMainView()
     }
 
-    Dialog {
+    C.Dialog {
         id: sessionPinDialog
         parent: Overlay.overlay
         x: Math.round((root.width - width) / 2)
