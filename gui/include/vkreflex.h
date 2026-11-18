@@ -55,9 +55,20 @@ bool lastDisplayTime(qint64 *display_us, qint64 max_age_us);
 // Display timing since the last call, empty when present wait is off.
 QString takeDisplayStats();
 // The last frames that reached the screen, oldest first: how many display
-// refreshes each stayed (up to max, at most 120). Does not reset anything.
-// latency_ms: their average present -> on screen time; hz: refresh rate.
-int recentPacing(int *refreshes_out, int max, double *latency_ms, double *hz);
+// refreshes each stayed (up to max). Does not reset anything, so
+// takeDisplayStats() is unaffected.
+// stats: the frames shown within the last window_us (histogram of
+// refreshes per frame 1..5, 6+; present -> on screen time for all,
+// generated and real frames, -1 when none) and the refresh rate.
+struct PacingStats {
+    int frames = 0;
+    int histogram[6] = {};
+    double latency_ms = 0.0;
+    double latency_generated_ms = -1.0;
+    double latency_real_ms = -1.0;
+    double hz = 0.0;
+};
+int recentPacing(int *refreshes_out, int max, qint64 window_us, PacingStats *stats);
 bool lowLatencyActive();
 bool presentWaitActive();
 

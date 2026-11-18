@@ -16,6 +16,7 @@
 #include <QVBoxLayout>
 #include <QWindow>
 #include <algorithm>
+#include <cmath>
 
 // Colors of the app theme (gui/src/qml/controls/Theme.qml)
 namespace {
@@ -37,7 +38,7 @@ QFont uiFont(int pixel_size, QFont::Weight weight = QFont::Normal)
     return f;
 }
 
-enum Row { RowStream, RowScreen, RowUpscaling, RowFrameGen, RowEnhancement, RowToScreen, RowPacketLoss, RowLost, RowDropped, RowQueue, RowPending, RowCount };
+enum Row { RowStream, RowScreen, RowUpscaling, RowFrameGen, RowEnhancement, RowEven, RowHistogram, RowToScreen, RowPacketLoss, RowLost, RowDropped, RowQueue, RowPending, RowCount };
 
 bool isFrameGenPart(const QString &part)
 {
@@ -66,10 +67,13 @@ public:
         setAttribute(Qt::WA_TranslucentBackground);
     }
 
-    void setData(const QVector<int> &v, int expected_refreshes)
+    // Bars from lo to hi refreshes are even (lo < hi when the display rate
+    // is not a multiple of the frame rate, e.g. 1-2 for 120 fps on 180 Hz)
+    void setData(const QVector<int> &v, int lo, int hi)
     {
         values = v;
-        expected = expected_refreshes;
+        expected_lo = lo;
+        expected_hi = hi;
         update();
     }
 
@@ -83,7 +87,7 @@ protected:
         p.drawLine(0, base + 1, width(), base + 1);
         if (values.isEmpty())
             return;
-        const int top_value = std::max(expected + 2, *std::max_element(values.cbegin(), values.cend()));
+        const int top_value = std::max(expected_hi + 2, *std::max_element(values.cbegin(), values.cend()));
         const double gap = 2.0;
         const double bar_w = (width() - gap * (chartFrames - 1)) / chartFrames;
         // Newest bar on the right
@@ -95,13 +99,14 @@ protected:
             const double x = (offset + i) * (bar_w + gap);
             QPainterPath path;
             path.addRoundedRect(QRectF(x, base - h, bar_w, h + 2), 2, 2);
-            p.fillPath(path, n == expected ? colAccent : colWarn);
+            p.fillPath(path, (n >= expected_lo && n <= expected_hi) ? colAccent : colWarn);
         }
     }
 
 private:
     QVector<int> values;
-    int expected = 0;
+    int expected_lo = 0;
+    int expected_hi = 0;
 };
 
 StatsOverlayWidget::StatsOverlayWidget(QmlMainWindow *owner, QmlBackend *backend)
@@ -151,7 +156,7 @@ StatsOverlayWidget::StatsOverlayWidget(QmlMainWindow *owner, QmlBackend *backend
     // Details
     details = new QFrame(this);
     details->setObjectName(QStringLiteral("statsDetails"));
-    details->setFixedWidth(440);
+    details->setFixedWidth(500);
     auto *detailsLayout = new QVBoxLayout(details);
     detailsLayout->setContentsMargins(20, 18, 20, 18);
     detailsLayout->setSpacing(12);
@@ -181,7 +186,7 @@ StatsOverlayWidget::StatsOverlayWidget(QmlMainWindow *owner, QmlBackend *backend
     grid->setVerticalSpacing(8);
     const QString titles[RowCount] = {
         tr("Stream"), tr("On screen"), tr("Upscaling"), tr("Frame generation"), tr("Enhancement"),
-        tr("Present → on screen"), tr("Packet loss"), tr("Lost frames"), tr("Dropped frames"),
+        tr("Even frames (5 s)"), tr("Refreshes per frame"), tr("Present → on screen"), tr("Packet loss"), tr("Lost frames"), tr("Dropped frames"),
         tr("Queue depth"), tr("Pending frame age"),
     };
     for (int i = 0; i < RowCount; i++) {
@@ -375,22 +380,38 @@ void StatsOverlayWidget::refresh()
     const double displayFps = owner ? owner->displayFps() : 0.0;
 
     // Frames on screen (present wait)
+    // Chart: the last 60 frames. Numbers: the frames of the last 5 s.
     int raw[chartFrames];
-    double screenLatency = 0.0, hz = 0.0;
-    const int count = VkReflex::recentPacing(raw, chartFrames, &screenLatency, &hz);
+    VkReflex::PacingStats window;
+    const int count = VkReflex::recentPacing(raw, chartFrames, 5000000, &window);
     QVector<int> pacing(raw, raw + count);
-    int expected = 0;
-    {
-        int hist[7] = {};
-        for (int n : pacing)
-            hist[std::clamp(n, 0, 6)]++;
-        for (int n = 1; n <= 6; n++) {
-            if (hist[n] > hist[expected])
-                expected = n;
+    const double screenLatency = window.latency_ms, hz = window.hz;
+    // Expected refreshes per frame: the most common count (3 for 60 fps on 180 Hz)
+    // Even = the refresh count(s) the display and frame rates allow: 3 for
+    // 60 fps on 180 Hz, 1 or 2 for 120 fps on 180 Hz. Without both rates,
+    // the most common count.
+    int expectedLo = 1, expectedHi = 1;
+    const double ideal = (hz > 0.0 && displayFps > 1.0) ? hz / displayFps : 0.0;
+    if (ideal >= 0.85) {
+        const double nearest = std::round(ideal);
+        if (std::abs(ideal - nearest) < 0.15)
+            expectedLo = expectedHi = std::clamp(static_cast<int>(nearest), 1, 6);
+        else {
+            expectedLo = std::clamp(static_cast<int>(std::floor(ideal)), 1, 6);
+            expectedHi = std::clamp(expectedLo + 1, 1, 6);
         }
+    } else {
+        for (int n = 2; n <= 6; n++) {
+            if (window.histogram[n - 1] > window.histogram[expectedLo - 1])
+                expectedLo = n;
+        }
+        expectedHi = expectedLo;
     }
-    const int even = static_cast<int>(std::count(pacing.cbegin(), pacing.cend(), expected));
-    const double evenShare = count ? static_cast<double>(even) / count : 1.0;
+    int evenFrames = 0;
+    for (int n = expectedLo; n <= expectedHi; n++)
+        evenFrames += window.histogram[n - 1];
+    const double evenShare = window.frames ? static_cast<double>(evenFrames) / window.frames : 1.0;
+    const QString expectedText = expectedLo == expectedHi ? QString::number(expectedLo) : QStringLiteral("%1–%2").arg(expectedLo).arg(expectedHi);
 
     // Enhancements by kind
     QStringList upscaling, frameGen, other;
@@ -443,11 +464,11 @@ void StatsOverlayWidget::refresh()
         const bool havePacing = count > 0;
         chart->setVisible(havePacing);
         legend->setVisible(true);
-        chart->setData(pacing, expected);
+        chart->setData(pacing, expectedLo, expectedHi);
         detailsHint->setText(havePacing ? tr("last %1 frames").arg(count) : QString());
         if (havePacing) {
             const QString swatch = QStringLiteral("<span style=\"color:%1\">■</span>&nbsp;%2");
-            legend->setText(swatch.arg(colAccent.name(), tr("Even (%1 refreshes)").arg(expected))
+            legend->setText(swatch.arg(colAccent.name(), tr("Even (%1 refreshes)").arg(expectedText))
                 + QStringLiteral("&nbsp;&nbsp;&nbsp;&nbsp;")
                 + swatch.arg(colWarn.name(), tr("Uneven"))
                 + QStringLiteral("&nbsp;&nbsp;&nbsp;&nbsp;")
@@ -461,7 +482,23 @@ void StatsOverlayWidget::refresh()
         setRow(RowUpscaling, upscaling.join(QLatin1Char('\n')), !upscaling.isEmpty());
         setRow(RowFrameGen, frameGen.join(QLatin1Char('\n')), !frameGen.isEmpty());
         setRow(RowEnhancement, other.join(QLatin1Char('\n')), !other.isEmpty());
-        setRow(RowToScreen, tr("%1 ms").arg(screenLatency, 0, 'f', 1), havePacing);
+        const bool haveWindow = window.frames > 0;
+        setRow(RowEven, tr("%1% at %2 refreshes · %3 frames").arg(evenShare * 100.0, 0, 'f', 1).arg(expectedText).arg(window.frames), haveWindow);
+        QStringList hist;
+        for (int n = 1; n <= 6; n++) {
+            const QString label = n == 6 ? QStringLiteral("6+") : QString::number(n);
+            const int v = window.histogram[n - 1];
+            const QString text = QStringLiteral("%1: %2").arg(label).arg(v);
+            hist << (n >= expectedLo && n <= expectedHi ? QStringLiteral("<b>%1</b>").arg(text)
+                     : v > 0 ? QStringLiteral("<span style=\"color:%1\">%2</span>").arg(colWarn.name(), text)
+                     : QStringLiteral("<span style=\"color:%1\">%2</span>").arg(colSecondary.name(), text));
+        }
+        rowValues[RowHistogram]->setTextFormat(Qt::RichText);
+        setRow(RowHistogram, hist.join(QStringLiteral("&nbsp;&nbsp;")), haveWindow);
+        QString toScreen = tr("%1 ms").arg(screenLatency, 0, 'f', 1);
+        if (window.latency_generated_ms >= 0.0 && window.latency_real_ms >= 0.0)
+            toScreen += tr(" (generated %1 · real %2)").arg(window.latency_generated_ms, 0, 'f', 1).arg(window.latency_real_ms, 0, 'f', 1);
+        setRow(RowToScreen, toScreen, haveWindow);
         setRow(RowPacketLoss, QStringLiteral("%1%").arg(packetLoss * 100.0, 0, 'f', 1), hasSession);
         setRow(RowLost, QString::number(lostFrames), hasSession && (style == Full || lostFrames > 0));
         setRow(RowDropped, QString::number(droppedFrames), droppedFrames > 0);

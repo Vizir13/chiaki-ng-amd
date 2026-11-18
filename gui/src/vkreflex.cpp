@@ -96,9 +96,11 @@ qint64 refreshes[6] = {}; // frames shown for 1..5, 6+ refreshes
 qint64 timeouts = 0;
 // The last frames on screen for the stream overlay (not reset by
 // takeDisplayStats): refreshes each one stayed, present -> on screen.
-constexpr int pace_ring_size = 120;
+constexpr int pace_ring_size = 1024; // > 5 s at 180 fps
 int pace_refreshes[pace_ring_size] = {};
 qint64 pace_latency_us[pace_ring_size] = {};
+qint64 pace_display_us[pace_ring_size] = {};
+int pace_kind[pace_ring_size] = {};
 int pace_head = 0, pace_count = 0;
 
 void markerFor(VkSwapchainKHR sc, uint64_t id, VkLatencyMarkerNV marker)
@@ -142,6 +144,8 @@ void recordDisplay(const PendingPresent &p, qint64 display_us)
             refreshes[n - 1]++;
             pace_refreshes[pace_head] = n;
             pace_latency_us[pace_head] = qMax<qint64>(0, display_us - p.present_us);
+            pace_display_us[pace_head] = display_us;
+            pace_kind[pace_head] = p.kind;
             pace_head = (pace_head + 1) % pace_ring_size;
             pace_count = qMin(pace_count + 1, pace_ring_size);
         }
@@ -906,22 +910,35 @@ QString takeDisplayStats()
     return s;
 }
 
-int recentPacing(int *refreshes_out, int max, double *latency_ms, double *hz)
+int recentPacing(int *refreshes_out, int max, qint64 window_us, PacingStats *stats)
 {
+    if (stats)
+        *stats = PacingStats();
     if (!present_wait.load(std::memory_order_relaxed))
         return 0;
     std::lock_guard<std::mutex> lock(stats_mutex);
     const int n = qMin(max, pace_count);
-    qint64 latency_sum = 0;
-    for (int i = 0; i < n; i++) {
-        const int idx = (pace_head - n + i + pace_ring_size) % pace_ring_size;
-        refreshes_out[i] = pace_refreshes[idx];
-        latency_sum += pace_latency_us[idx];
+    for (int i = 0; i < n; i++)
+        refreshes_out[i] = pace_refreshes[(pace_head - n + i + pace_ring_size) % pace_ring_size];
+    if (stats) {
+        stats->hz = refresh_period_us > 0.0 ? 1000000.0 / refresh_period_us : 0.0;
+        const qint64 since = nowUs() - window_us;
+        qint64 sum[3] = {}, count[3] = {};
+        for (int i = 1; i <= pace_count; i++) {
+            const int idx = (pace_head - i + pace_ring_size) % pace_ring_size;
+            if (pace_display_us[idx] < since)
+                break;
+            stats->frames++;
+            stats->histogram[qBound(1, pace_refreshes[idx], 6) - 1]++;
+            const int kind = qBound(0, pace_kind[idx], 2);
+            sum[kind] += pace_latency_us[idx];
+            count[kind]++;
+        }
+        const qint64 all_sum = sum[0] + sum[1] + sum[2], all_count = count[0] + count[1] + count[2];
+        stats->latency_ms = all_count ? all_sum / static_cast<double>(all_count) / 1000.0 : 0.0;
+        stats->latency_generated_ms = count[1] ? sum[1] / static_cast<double>(count[1]) / 1000.0 : -1.0;
+        stats->latency_real_ms = count[2] ? sum[2] / static_cast<double>(count[2]) / 1000.0 : -1.0;
     }
-    if (latency_ms)
-        *latency_ms = n ? latency_sum / static_cast<double>(n) / 1000.0 : 0.0;
-    if (hz)
-        *hz = refresh_period_us > 0.0 ? 1000000.0 / refresh_period_us : 0.0;
     return n;
 }
 
@@ -943,7 +960,7 @@ void setRefreshRate(double) {}
 bool lastDisplayTime(qint64 *, qint64) { return false; }
 bool delayNextPresent(qint64, void (*)(qint64, qint64, qint64)) { return false; }
 QString takeDisplayStats() { return QString(); }
-int recentPacing(int *, int, double *, double *) { return 0; }
+int recentPacing(int *, int, qint64, PacingStats *stats) { if (stats) *stats = PacingStats(); return 0; }
 bool lowLatencyActive() { return false; }
 bool presentWaitActive() { return false; }
 
