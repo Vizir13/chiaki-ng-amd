@@ -1011,6 +1011,21 @@ static qint64 snapPresentToVblank(qint64 target_us, double refresh_rate)
 #endif
 }
 
+// Size upscaling and frame generation work at: the video area on screen, or
+// with a processing height set that height at the area's aspect (e.g. VFG at
+// 1440p on a 4K display, scaled up by the final render).
+static void processingSize(const struct pl_frame &target, int height, int *w, int *h)
+{
+    const float cw = fabsf(pl_rect_w(target.crop));
+    const float ch = fabsf(pl_rect_h(target.crop));
+    *w = static_cast<int>(lroundf(cw));
+    *h = static_cast<int>(lroundf(ch));
+    if (height > 0 && ch > 0.0f) {
+        *h = height;
+        *w = static_cast<int>(lroundf(cw * height / ch / 2.0f)) * 2;
+    }
+}
+
 // Sleeps until `target_us` (monotonic), spinning for the last stretch.
 static void waitUntilMonotonicUs(qint64 target_us)
 {
@@ -8263,8 +8278,8 @@ void QmlMainWindow::render()
     const int rtx_vsr_quality = rtx_vsr && has_settings ? settings->GetRtxVsrQuality() : 0;
     const qint64 vsr_begin_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
     if (!fg_override && rtx_vsr_quality > 0 && nvidia_card && stream_active && rtx_vsr->ensureInitialized(placebo_vulkan)) {
-        const int vsr_out_w = static_cast<int>(lroundf(fabsf(pl_rect_w(target_frame.crop))));
-        const int vsr_out_h = static_cast<int>(lroundf(fabsf(pl_rect_h(target_frame.crop))));
+        int vsr_out_w = 0, vsr_out_h = 0;
+        processingSize(target_frame, settings->GetProcessingHeight(), &vsr_out_w, &vsr_out_h);
         if (bypass_frame_queue) {
             struct pl_frame upscaled = {};
             uint64_t upscaled_signature = 0;
@@ -8368,8 +8383,8 @@ void QmlMainWindow::render()
         }
         if (multiplier >= 2 && frame_gen->ensureInitialized(placebo_vulkan, backend_choice)) {
             multiplier = qMin(multiplier, frame_gen->maxMultiplier());
-            const int fg_out_w = static_cast<int>(lroundf(fabsf(pl_rect_w(target_frame.crop))));
-            const int fg_out_h = static_cast<int>(lroundf(fabsf(pl_rect_h(target_frame.crop))));
+            int fg_out_w = 0, fg_out_h = 0;
+            processingSize(target_frame, settings->GetProcessingHeight(), &fg_out_w, &fg_out_h);
             std::vector<struct pl_frame> fg_outputs;
             if (!fg_crash_guard_armed && fg_crash_guard_good_frames == 0) {
                 // Cleared once generated frames have been shown for a while.

@@ -103,6 +103,7 @@ class QmlSettings : public QObject
 	Q_PROPERTY(int placeboFrameMixer READ placeboFrameMixer WRITE setPlaceboFrameMixer NOTIFY placeboFrameMixerChanged)
 	Q_PROPERTY(bool directFrameMapping READ directFrameMapping WRITE setDirectFrameMapping NOTIFY directFrameMappingChanged)
 	Q_PROPERTY(int rtxVsrQuality READ rtxVsrQuality WRITE setRtxVsrQuality NOTIFY rtxVsrQualityChanged)
+	Q_PROPERTY(int processingHeight READ processingHeight WRITE setProcessingHeight NOTIFY processingHeightChanged)
 	Q_PROPERTY(bool rtxVsrSupported READ rtxVsrSupported CONSTANT)
 	Q_PROPERTY(bool rtxVsrExtendedModes READ rtxVsrExtendedModes CONSTANT)
 	Q_PROPERTY(QString rtxVsrDllVersion READ rtxVsrDllVersion CONSTANT)
@@ -376,6 +377,8 @@ public:
     bool directFrameMapping() const;
     void setDirectFrameMapping(bool enabled);
     int rtxVsrQuality() const;
+    int processingHeight() const;
+    void setProcessingHeight(int height);
     void setRtxVsrQuality(int quality);
     Q_INVOKABLE void toggleRtxVsr();
     Q_INVOKABLE void toggleFrameGen();
@@ -784,6 +787,7 @@ signals:
     void placeboFrameMixerChanged();
     void directFrameMappingChanged();
     void rtxVsrQualityChanged();
+    void processingHeightChanged();
     void frameGenBackendChanged();
     void frameGenMultiplierChanged();
     void placeboDeinterlaceEnabledChanged();

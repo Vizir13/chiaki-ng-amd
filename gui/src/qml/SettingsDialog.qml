@@ -1092,6 +1092,29 @@ DialogView {
 
                     Label {
                         Layout.alignment: Qt.AlignRight
+                        visible: Chiaki.settings.rtxVsrSupported || Chiaki.settings.frameGenSupported
+                        text: qsTr("Output Resolution:")
+                    }
+
+                    C.ComboBox {
+                        Layout.preferredWidth: 400
+                        visible: Chiaki.settings.rtxVsrSupported || Chiaki.settings.frameGenSupported
+                        readonly property var heights: [0, 1080, 1440, 1620, 2160]
+                        model: [qsTr("Auto (match the screen)"), "1080p", "1440p", "1620p", qsTr("2160p (4K)")]
+                        currentIndex: Math.max(0, heights.indexOf(Chiaki.settings.processingHeight))
+                        onActivated: index => Chiaki.settings.processingHeight = heights[index]
+                        ToolTip.visible: hovered
+                        ToolTip.text: qsTr("Resolution RTX Video upscales to and frame generation works at; the result is then scaled to the screen. Lower than the screen saves GPU time (e.g. 1440p on a 4K display), higher supersamples.")
+                    }
+
+                    Label {
+                        Layout.alignment: Qt.AlignRight
+                        visible: Chiaki.settings.rtxVsrSupported || Chiaki.settings.frameGenSupported
+                        text: qsTr("(Auto)")
+                    }
+
+                    Label {
+                        Layout.alignment: Qt.AlignRight
                         visible: Chiaki.settings.frameGenSupported
                         text: qsTr("Frame Generation:")
                     }

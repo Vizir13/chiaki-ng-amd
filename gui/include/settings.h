@@ -523,6 +523,10 @@ class Settings : public QObject
 		void SetDirectFrameMapping(bool enabled) { settings.setValue("settings/direct_frame_mapping", enabled); }
 		// RTX Video mode passed to NGX as VSR.QualityLevel: 0 = off, 1-4 = upscale,
 		// 8-11 = artifact reduction, 21/23 = streaming (see RtxVsr::isValidQuality)
+		// Height upscaling and frame generation work at (0: the video area on
+		// screen); libplacebo scales the result to the screen.
+		int GetProcessingHeight() const { return settings.value("settings/processing_height", 0).toInt(); }
+		void SetProcessingHeight(int height) { settings.setValue("settings/processing_height", height); }
 		int GetRtxVsrQuality() const { return ValidRtxVsrQuality(settings.value("settings/rtx_vsr_quality", 0).toInt()); }
 		void SetRtxVsrQuality(int quality)
 		{

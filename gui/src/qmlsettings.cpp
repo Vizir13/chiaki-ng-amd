@@ -1185,6 +1185,19 @@ void QmlSettings::setFrameGenVfgMode(int mode)
     emit frameGenVfgModeChanged();
 }
 
+int QmlSettings::processingHeight() const
+{
+    return settings->GetProcessingHeight();
+}
+
+void QmlSettings::setProcessingHeight(int height)
+{
+    if (height == settings->GetProcessingHeight())
+        return;
+    settings->SetProcessingHeight(height);
+    emit processingHeightChanged();
+}
+
 bool QmlSettings::frameGenVfgChain() const
 {
     return settings->GetFrameGenVfgChain();
