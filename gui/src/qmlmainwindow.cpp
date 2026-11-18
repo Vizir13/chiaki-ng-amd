@@ -854,6 +854,35 @@ static void logTimerFireInterval(qint64 now_us)
     }
 }
 
+// Present path timings, reported with the frame generation summary.
+struct PresentPathTiming {
+    std::atomic<qint64> sum{0}, max{0}, count{0};
+    void add(qint64 us)
+    {
+        if (us < 0)
+            return;
+        sum.fetch_add(us, std::memory_order_relaxed);
+        count.fetch_add(1, std::memory_order_relaxed);
+        qint64 m = max.load(std::memory_order_relaxed);
+        while (us > m && !max.compare_exchange_weak(m, us, std::memory_order_relaxed)) {}
+    }
+    QString take()
+    {
+        const qint64 n = count.exchange(0);
+        const qint64 s = sum.exchange(0);
+        const qint64 m = max.exchange(0);
+        return QStringLiteral("%1/%2").arg(n ? s / n / 1000.0 : 0.0, 0, 'f', 1).arg(m / 1000.0, 0, 'f', 1);
+    }
+};
+static PresentPathTiming fg_time_start_frame;   // pl_swapchain_start_frame (acquire)
+static PresentPathTiming fg_time_render_work;   // render entry -> frame ready to submit
+static PresentPathTiming fg_time_pace;          // present pacing wait
+static PresentPathTiming fg_time_submit;        // pl_swapchain_submit_frame
+static PresentPathTiming fg_time_swap;          // pl_swapchain_swap_buffers
+static PresentPathTiming fg_time_handoff;       // present done -> next render that does work
+static std::atomic<qint64> fg_present_done_us{0};
+static std::atomic<qint64> fg_blocked_renders{0}; // renders skipped while a present was in flight
+
 static void logSwapInterval(qint64 now_us)
 {
     if (!chiakiGui().isDebugEnabled())
@@ -5981,6 +6010,7 @@ void QmlMainWindow::processDeferredSwapTask(qint64 submit_begin_us,
         const qint64 pace_begin_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
         throttleFramePresentation(paced_interval_s);
         const qint64 pace_end_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+        fg_time_pace.add(pace_end_us - pace_begin_us);
         if (pace_end_us >= pace_begin_us)
             logLatencyStats("submit_pacing_wait", pace_end_us - pace_begin_us);
     }
@@ -5993,6 +6023,7 @@ void QmlMainWindow::processDeferredSwapTask(qint64 submit_begin_us,
         else {
             display_frames_current.fetchAndAddRelaxed(1);
             const qint64 submit_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+            fg_time_submit.add(submit_us - submit_call_begin_us);
             logLatencyStats("pl_swapchain_submit_frame", submit_us - submit_call_begin_us);
             CHIAKI_NOISY_DEBUG().nospace()
                 << "[latency] pl_swapchain_submit_frame_us=" << (submit_us - submit_call_begin_us)
@@ -6033,6 +6064,8 @@ void QmlMainWindow::processDeferredSwapTask(qint64 submit_begin_us,
             pl_swapchain_swap_buffers(placebo_swapchain);
 
             const qint64 swap_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+            fg_time_swap.add(swap_us - present_swap_begin_us);
+            fg_present_done_us.store(swap_us, std::memory_order_release);
             logSwapInterval(swap_us);
             this->last_swap_return_us.storeRelease(swap_us);
             this->last_present_complete_us.storeRelease(swap_us);
@@ -6853,8 +6886,14 @@ void QmlMainWindow::render()
         vulkan_deferred_swap_enabled &&
         deferred_present_in_flight.loadAcquire() != 0;
     if (deferred_present_active) {
+        fg_blocked_renders.fetch_add(1, std::memory_order_relaxed);
         finalize_render();
         return;
+    }
+    {
+        const qint64 present_done_us = fg_present_done_us.exchange(0, std::memory_order_acq_rel);
+        if (present_done_us > 0)
+            fg_time_handoff.add(static_cast<qint64>(chiaki_time_now_monotonic_us()) - present_done_us);
     }
     const bool swapchain_recreated = swapchain_recreate_pending.fetchAndStoreRelaxed(0) != 0;
     if (swapchain_recreated) {
@@ -7044,6 +7083,15 @@ void QmlMainWindow::render()
         // display rate when generated frames are dropped: report it.
         const qint64 now_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
         if (now_us - fg_drop_log_us >= 5000000) {
+            // Where the time between presents goes (avg/max ms).
+            const QString present_path = QStringLiteral(
+                "acquire %1, render %2, pacing %3, submit %4, swap %5, present->next render %6, renders skipped while presenting %7")
+                .arg(fg_time_start_frame.take(), fg_time_render_work.take(), fg_time_pace.take(),
+                     fg_time_submit.take(), fg_time_swap.take(), fg_time_handoff.take())
+                .arg(fg_blocked_renders.exchange(0));
+            if (fg_drop_log_us && fg_dropped_count + fg_shown_count > 0)
+                qCInfo(chiakiGui).nospace() << "[framegen] Present path in the last "
+                    << (now_us - fg_drop_log_us) / 1000 << " ms (avg/max ms): " << present_path;
             if (fg_dropped_count > 0)
                 qCInfo(chiakiGui).nospace() << "[framegen] Generated frames in the last "
                     << (fg_drop_log_us ? (now_us - fg_drop_log_us) / 1000 : 0) << " ms: " << fg_shown_count
@@ -7301,6 +7349,7 @@ void QmlMainWindow::render()
     if (start_frame_us >= start_frame_begin_us)
     {
         const qint64 start_frame_block_us = start_frame_us - start_frame_begin_us;
+        fg_time_start_frame.add(start_frame_block_us);
         logLatencyStats("start_frame_block", start_frame_block_us);
         const auto render_schedule_state = snapshotRenderScheduleState();
         logRenderPhaseStall(start_frame_us,
@@ -7339,6 +7388,11 @@ void QmlMainWindow::render()
     // Submit immediately and let the swapchain / render path enforce pacing.
     auto close_started_frame = [this, timer_owned_playback, present_interval_us, start_frame_us, depth_limit, pending_frame_waiting, pending_overflow_waiting, snapshotQueueDepth, snapshotRenderScheduleState, present_submit_interval_s](bool present) -> bool {
         const qint64 submit_ready_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+        {
+            const qint64 entry_us = last_render_entry_us.loadAcquire();
+            if (entry_us > 0)
+                fg_time_render_work.add(submit_ready_us - entry_us);
+        }
         const int queue_depth_now = snapshotQueueDepth();
         if (detailedVerboseTelemetryEnabled()) {
             static qint64 last_present_trace_log_us = 0;
@@ -7393,7 +7447,9 @@ void QmlMainWindow::render()
                     ? 0.80
                     : (present_backpressure_active.loadAcquire() != 0 ? 0.90 : 1.0);
                 const double paced_interval_s = present_submit_interval_s * pace_multiplier;
+                const qint64 pace_begin_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
                 throttleFramePresentation(paced_interval_s);
+                fg_time_pace.add(static_cast<qint64>(chiaki_time_now_monotonic_us()) - pace_begin_us);
             }
             else
                 throttleFramePresentation(0.0);
@@ -7423,6 +7479,7 @@ void QmlMainWindow::render()
                 else {
                     display_frames_current.fetchAndAddRelaxed(1);
                     submit_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+                    fg_time_submit.add(submit_us - submit_begin_us);
             logLatencyStats("pl_swapchain_submit_frame", submit_us - submit_begin_us);
             CHIAKI_NOISY_DEBUG().nospace()
                 << "[latency] pl_swapchain_submit_frame_us=" << (submit_us - submit_begin_us)
@@ -7486,6 +7543,8 @@ void QmlMainWindow::render()
                     pl_swapchain_swap_buffers(placebo_swapchain);
                 }
                 const qint64 swap_us = static_cast<qint64>(chiaki_time_now_monotonic_us());
+                fg_time_swap.add(swap_us - present_swap_begin_us);
+                fg_present_done_us.store(swap_us, std::memory_order_release);
                 logSwapInterval(swap_us);
                 this->last_swap_return_us.storeRelease(swap_us);
                 present_complete_us = swap_us;
