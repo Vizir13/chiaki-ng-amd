@@ -51,6 +51,8 @@ public:
         double changed = 1.0;
         // Decided by the compressed size (the picture alone was not clear).
         bool by_size = false;
+        // Taken as new only because it would have been a third repeat in a row.
+        bool forced = false;
     };
 
     // Classifies a frame from its RGBA8 thumbnail (kWidth x kHeight, rows of
@@ -82,12 +84,25 @@ public:
                 r.kind = small ? Kind::Repeat : Kind::New;
             }
         }
+        // No game shown at 20 fps or more repeats a picture for three stream
+        // frames: a third "repeat" in a row is a nearly still scene (a still
+        // camera at night, where noise keeps the change between the two
+        // thresholds and the new pictures are as small as repeats). Show it,
+        // so the output never stalls, and let it reset the size reference;
+        // its gap says nothing about the game's frame rate.
+        if (r.kind == Kind::Repeat && have_seq && seq >= last_seq + kMaxCadence) {
+            r.kind = Kind::New;
+            r.forced = true;
+        }
         if (r.kind == Kind::New) {
             reference.swap(luma);
+            // The size reference follows the scene quickly: a reference left
+            // from a busy scene would make every picture of a calm one look
+            // like a repeat.
             if (packet_size > 0)
-                new_size = new_size > 0.0 ? new_size + (static_cast<double>(packet_size) - new_size) / 8.0
+                new_size = new_size > 0.0 ? new_size + (static_cast<double>(packet_size) - new_size) / 4.0
                                           : static_cast<double>(packet_size);
-            newPicture(seq);
+            newPicture(seq, !r.forced);
         }
         return r;
     }
@@ -109,6 +124,7 @@ public:
         reference.clear();
         new_size = 0.0;
         have_seq = false;
+        gap_unreliable = false;
         last_seq = 0;
         gaps_count = 0;
         gaps_cursor = 0;
@@ -116,9 +132,13 @@ public:
     }
 
 private:
-    void newPicture(uint64_t seq)
+    // `measure`: the gap to this picture counts for the cadence. The gap after
+    // a forced picture is not measured either (it started at a guess).
+    void newPicture(uint64_t seq, bool measure = true)
     {
-        if (have_seq && seq > last_seq) {
+        const bool measured = measure && !gap_unreliable;
+        gap_unreliable = !measure;
+        if (measured && have_seq && seq > last_seq) {
             const uint64_t gap = seq - last_seq;
             // Longer gaps are stills or stalls, not the game's frame rate.
             if (gap <= kMaxGap) {
@@ -164,6 +184,7 @@ private:
     std::vector<uint8_t> reference;
     double new_size = 0.0;
     bool have_seq = false;
+    bool gap_unreliable = false;
     uint64_t last_seq = 0;
     std::array<uint8_t, 12> gaps = {};
     size_t gaps_count = 0;

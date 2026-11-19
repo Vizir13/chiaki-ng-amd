@@ -455,6 +455,7 @@ private:
         int news = 0;
         int repeats = 0;
         int by_size = 0;
+        int forced = 0;
         int unknown = 0;
         int64_t thumb_us_total = 0;
         int64_t thumb_us_max = 0;

@@ -5903,6 +5903,8 @@ bool QmlMainWindow::detectRepeatedPicture()
         }
         if (r.by_size)
             st.by_size++;
+        if (r.forced)
+            st.forced++;
     } else {
         fg_repeat_detector.unknown(direct_frame_seq);
         st.unknown++;
@@ -5919,7 +5921,8 @@ bool QmlMainWindow::detectRepeatedPicture()
         const int measured = st.news + st.repeats;
         qCInfo(chiakiGui).nospace()
             << "Repeat detection: " << st.news << " new, " << st.repeats << " repeated, "
-            << st.by_size << " decided by size, " << st.unknown << " not compared; changed share: new min "
+            << st.by_size << " decided by size, " << st.forced << " shown as still scene, " << st.unknown
+            << " not compared; changed share: new min "
             << st.new_changed_min * 100.0 << "%, repeat max " << st.repeat_changed_max * 100.0
             << "%; thumbnail " << (measured ? st.thumb_us_total / measured : 0) << " us avg, "
             << st.thumb_us_max << " us max";
