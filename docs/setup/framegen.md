@@ -137,13 +137,19 @@ instead of zero motion.
 ### 30 fps games in a 60 fps stream
 
 The console keeps sending 60 frames per second even when the game renders
-only 30, so every picture arrives twice. chiaki-ng recognises this from the
-size of the encoded frames (a repeat is an almost empty frame), drops the
-repeats and generates frames from the real 30 fps pictures; the multiplier
-doubles so the output frame rate stays what you picked (2x of a 60 fps stream
-= 4x of the 30 fps pictures = 120 fps). The stats overlay then shows
-*(half-rate source)* and the log `Source cadence: every picture repeated`.
-It switches back within a frame or two when the game runs at 60 again.
+only 30, so every picture arrives twice. chiaki-ng compares every frame
+with the last new picture on a small GPU thumbnail (a repeat is the same
+picture, a new one in motion changes a large part of it; the size of the
+encoded frame only decides near-still frames), drops the repeats and
+generates frames from the real 30 fps pictures; the multiplier doubles so the
+output frame rate stays what you picked (2x of a 60 fps stream = 4x of the
+30 fps pictures = 120 fps). The game's frame rate is the average distance
+between new pictures, so 40, 24 and 20 fps games work too and the game's own
+pacing hiccups do not switch modes. The stats overlay then shows
+*(half-rate source)* for 30 fps and the log
+`Source cadence: a new picture every 2 stream frames`, plus a summary of the
+detection every 10 s (`Repeat detection: ...`). It switches back within
+about 0.2 s when the game runs at 60 again.
 Pick a multiplier whose output divides your refresh rate evenly (on 240 Hz:
 2x or 4x of 60, not 3x).
 

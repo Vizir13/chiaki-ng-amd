@@ -84,6 +84,13 @@ public:
     bool process(const struct pl_frame *src, int out_w, int out_h, int multiplier,
                  float frame_interval_ms, std::vector<struct pl_frame> &outputs);
 
+    // Renders `src` into a small RGBA8 thumbnail (`w` x `h`, area averaged)
+    // and copies it to `rgba` (rows of w * 4 bytes). Waits for the GPU, which
+    // is idle or nearly so when a stream frame arrives. Used to tell repeated
+    // pictures from new ones (see repeatcadence.h). Only once a backend has
+    // been initialized; false if unavailable.
+    bool thumbnail(const struct pl_frame *src, int w, int h, uint8_t *rgba);
+
     struct Impl;
 
 private:

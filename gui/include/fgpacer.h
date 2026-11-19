@@ -18,9 +18,12 @@
 //    evenly over that period;
 //  - the period follows the measured picture rate (console and PC clocks
 //    drift apart slowly), bounded to +-1% of the nominal rate;
-//  - a late picture shifts the clock (one visible hitch) and widens the
-//    buffer; long stable stretches shrink it back, so the added latency stays
-//    as small as the connection allows;
+//  - a lone late picture (a Wi-Fi retry, or the game itself showing a picture
+//    one stream frame late) is shown at once and its frames are squeezed into
+//    what is left of its period, so the clock and the following pictures are
+//    not delayed; only pictures late twice in a row shift the clock;
+//  - repeated small lateness widens the buffer; long stable stretches shrink
+//    it back, so the added latency stays as small as the connection allows;
 //  - if pictures keep arriving well before their slot the clock is pulled in
 //    gradually, so latency never builds up.
 //
@@ -64,8 +67,12 @@ public:
     // (stream frame interval times the repeat cadence) is ready at `now_us`.
     // `extra_lead_us` is added to the buffer (e.g. the GPU time still needed
     // for the generated frames). Writes the presentation time of each frame
-    // into `targets_us` (count entries) and returns the first one.
-    int64_t schedule(int64_t now_us, int64_t nominal_period, int count, int64_t extra_lead_us, int64_t *targets_us)
+    // into `targets_us` (count entries) and returns the first one. Frames are
+    // never closer than `min_spacing_us` (the display refresh interval): when
+    // a late picture leaves too little time, its first generated frames get
+    // the target -1 (not shown); the real picture, last, is always shown.
+    int64_t schedule(int64_t now_us, int64_t nominal_period, int count, int64_t extra_lead_us, int64_t *targets_us,
+                     int64_t min_spacing_us = 0)
     {
         count = (std::max)(count, 1);
         extra_lead_us = (std::max)(extra_lead_us, int64_t(0));
@@ -91,6 +98,8 @@ public:
         const int64_t lead_wanted = buffer_us + extra_lead_us;
 
         int64_t start;
+        // Time over which this batch's frames are spread.
+        int64_t span = period;
         if (!next_start_us || next_start_us - now_us > period + cfg.max_buffer_us + extra_lead_us ||
             now_us - next_start_us > period) {
             // First batch, or the clock is far off (stall, long pause): resync.
@@ -99,15 +108,25 @@ public:
             excess_avg_us = 0.0;
         } else if (next_start_us < now_us + extra_lead_us) {
             // Late: this picture missed its slot. Show it as soon as it can be.
-            // A lone spike (Wi-Fi retry) is one hitch; only repeated late
-            // pictures widen the buffer, which costs latency on every frame.
-            // Half the buffer is rebuilt at once so the next picture is not
-            // late again; the steering below restores the rest.
+            // A lone late picture keeps the clock: shifting it would delay
+            // every following picture (they arrive on time) until the
+            // steering pulled it back, i.e. latency after every hiccup. Its
+            // frames are squeezed into what is left of its period instead.
+            // Late twice in a row means the pictures now arrive later (route
+            // change, drift): the clock moves, with half the buffer rebuilt at
+            // once so the next picture is not late again; the steering below
+            // restores the rest.
             // Only a picture a little late (jitter just above the buffer)
-            // widens it: a large Wi-Fi spike would not be covered by any
-            // affordable buffer, so growing for it only adds latency.
+            // widens the buffer: a large Wi-Fi spike would not be covered by
+            // any affordable buffer, so growing for it only adds latency.
             const int64_t late_by_us = now_us + extra_lead_us - next_start_us;
-            start = now_us + extra_lead_us + buffer_us / 2;
+            const bool isolated = batches - last_late_batch > 1;
+            if (isolated && late_by_us * 4 < period * 3) {
+                start = now_us + extra_lead_us;
+                span = next_start_us + period - start;
+            } else {
+                start = now_us + extra_lead_us + buffer_us / 2;
+            }
             late_batches++;
             stable_batches = 0;
             excess_avg_us = 0.0;
@@ -133,9 +152,18 @@ public:
             }
         }
 
-        for (int k = 0; k < count; k++)
-            targets_us[k] = start + (period * k) / count;
-        next_start_us = start + period;
+        // Frames that fit at the display's pace: the last ones (closest to the
+        // real picture) are kept, the motion catches up on the first.
+        // Only a squeezed batch: a full period always fits (the multiplier is
+        // capped to the refresh rate), whatever the measured period does.
+        int shown = count;
+        if (min_spacing_us > 0 && span < period && span < static_cast<int64_t>(count) * min_spacing_us)
+            shown = static_cast<int>(std::clamp<int64_t>(span / min_spacing_us, 1, count));
+        for (int k = 0; k < count - shown; k++)
+            targets_us[k] = -1;
+        for (int k = 0; k < shown; k++)
+            targets_us[count - shown + k] = start + (span * k) / shown;
+        next_start_us = start + span;
         batches++;
         return start;
     }

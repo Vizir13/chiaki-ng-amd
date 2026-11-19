@@ -223,6 +223,9 @@ private:
     void handleBufferedPlaybackWake(qint64 timer_fire_us);
     void completeStartupVideoVisibility(quint64 generation);
     bool throttleFramePresentation(double interval_s);
+    // Render thread, frame generation on: whether the frame just mapped in
+    // direct_frame repeats the last new picture (updates the cadence).
+    bool detectRepeatedPicture();
     void handleDeferredPresentWake(qint64 timer_fire_us);
     bool enqueueDeferredSwap(qint64 submit_begin_us,
                              int queue_depth_at_submit,
@@ -313,8 +316,16 @@ private:
     // stop as soon as a new picture is there.
     int64_t direct_pending_arrival_us = 0;
     QAtomicInteger<int> direct_pending_available = 0;
-    // Arrival time of the picture mapped in direct_frame (render thread).
+    // Position of the pending frame in the stream (every stream frame counts,
+    // lost ones included) and its compressed size, for repeat detection.
+    uint64_t direct_stream_seq = 0;
+    uint64_t direct_pending_seq = 0;
+    size_t direct_pending_packet_size = 0;
+    // Arrival time, stream position and size of the frame mapped in
+    // direct_frame (render thread).
     int64_t direct_frame_arrival_us = 0;
+    uint64_t direct_frame_seq = 0;
+    size_t direct_frame_packet_size = 0;
     struct pl_frame direct_frame = {};
     QAtomicInteger<int> direct_frame_reset = 0;
     uint64_t ts_start = 0;
@@ -362,12 +373,10 @@ private:
     QAtomicInteger<int> fg_status_backend = 0;
     QAtomicInteger<int> fg_status_multiplier = 0;
     QAtomicInteger<int> fg_status_reason = 0;
-    // Stream frames per game picture (2 = 30 fps game in a 60 fps stream,
-    // repeats dropped before frame generation); set by presentFrame.
-    RepeatCadenceDetector repeat_detector;
-    // Set when a stream starts; presentFrame then starts the detector afresh.
-    QAtomicInteger<int> repeat_detector_reset_pending = 0;
-    QAtomicInteger<int> fg_source_cadence = 1;
+    // Stream frames per game picture in halves (2 = a new picture every
+    // stream frame, 4 = 30 fps game in a 60 fps stream), for the overlay;
+    // set by the render thread (fg_repeat_detector).
+    QAtomicInteger<int> fg_source_cadence2 = 2;
     // Frame generation GPU time (us) and presentation buffer (us), written by
     // the render thread for the stats overlay (which must not touch frame_gen).
     QAtomicInteger<int> fg_status_gpu_us = 0;
@@ -434,8 +443,25 @@ private:
     FgQueuedFrame fg_presenting = {};
     bool fg_presenting_valid = false;
     int fg_active_multiplier = 1;
-    int fg_active_cadence = 1;
+    // Cadence (in half stream frames) the active multiplier was chosen for.
+    int fg_active_cadence2 = 2;
     int fg_last_backend = 0;
+    // Repeated pictures, told from new ones by their content while frame
+    // generation is on (render thread), and their stats for the log.
+    RepeatDetector fg_repeat_detector;
+    std::vector<uint8_t> fg_thumbnail;
+    struct RepeatStats
+    {
+        int news = 0;
+        int repeats = 0;
+        int by_size = 0;
+        int unknown = 0;
+        int64_t thumb_us_total = 0;
+        int64_t thumb_us_max = 0;
+        double repeat_changed_max = 0.0;
+        double new_changed_min = 1.0;
+        int64_t since_us = 0;
+    } fg_repeat_stats;
     uint64_t direct_frame_serial = 0;
     pl_queue placebo_queue = {};
     std::array<pl_tex, 8> placebo_tex{};

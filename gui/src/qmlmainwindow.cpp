@@ -3202,32 +3202,24 @@ void QmlMainWindow::presentFrame(ChiakiFfmpegFrame frame, int32_t frames_lost, q
     stream_frames_current.fetchAndAddRelaxed(1);
 
     if (bypass_frame_queue) {
-        if (repeat_detector_reset_pending.fetchAndStoreRelaxed(0) != 0)
-            repeat_detector.reset();
-        const bool repeat = repeat_detector.feed(frame.packet_size);
-        const int cadence = repeat_detector.cadence();
-        if (fg_source_cadence.fetchAndStoreRelaxed(cadence) != cadence) {
-            qCInfo(chiakiGui).nospace() << "Source cadence: "
-                << (cadence == 2 ? "every picture repeated (e.g. 30 fps game in a 60 fps stream)"
-                                 : "a new picture every stream frame")
-                << ", new picture " << static_cast<qint64>(repeat_detector.newPictureSize())
-                << " B, last frame " << static_cast<qint64>(repeat_detector.lastSize()) << " B";
-        }
-        // The repeat is the same picture; frame generation only works on new ones.
-        if (repeat && fg_status_backend.loadRelaxed() > 0) {
-            av_frame_free(&frame.frame);
-            return;
-        }
+        // Repeated pictures (e.g. a 30 fps game in a 60 fps stream) are told
+        // apart by the render thread from their content (repeatcadence.h).
         {
             QMutexLocker locker(&direct_frame_mutex);
+            direct_stream_seq += 1 + static_cast<uint64_t>(qMax<int32_t>(frames_lost, 0));
             if (direct_pending_frame) {
+                // Not taken yet: the older frame's arrival is kept, so a new
+                // picture overtaken by its own repeat is not seen as late.
                 av_frame_free(&direct_pending_frame);
                 dropped_frames_current.fetchAndAddRelaxed(1);
+            } else {
+                // Taken here, not when the render thread gets to it: the render
+                // may be waiting for a frame slot, which is not network jitter.
+                direct_pending_arrival_us = static_cast<int64_t>(chiaki_time_now_monotonic_us());
             }
             direct_pending_frame = frame.frame;
-            // Taken here, not when the render thread gets to it: the render
-            // may be waiting for a frame slot, which is not network jitter.
-            direct_pending_arrival_us = static_cast<int64_t>(chiaki_time_now_monotonic_us());
+            direct_pending_seq = direct_stream_seq;
+            direct_pending_packet_size = frame.packet_size;
             direct_pending_available.storeRelease(1);
         }
         if (!startup_warmup_frame_active)
@@ -5390,7 +5382,6 @@ renderer_backend_ready:
         // The render thread logs the VSR / frame generation state again in
         // each stream's log.
         enhancement_log_reset.storeRelease(1);
-        repeat_detector_reset_pending.storeRelease(1);
         if (!s)
             QFile::remove(frameGenCrashGuardPath());
         else if (!fg_crash_guard_notice.isEmpty()) {
@@ -5609,7 +5600,7 @@ renderer_backend_ready:
             const int multiplier = fg_status_multiplier.loadRelaxed();
             if (multiplier > 1) {
                 part += QStringLiteral(" %1x").arg(multiplier);
-                if (fg_source_cadence.loadRelaxed() == 2)
+                if (fg_source_cadence2.loadRelaxed() == 4)
                     part += tr(" (half-rate source)");
                 // Written by the render thread: frame_gen itself may be torn
                 // down there at any moment.
@@ -5882,6 +5873,60 @@ void QmlMainWindow::scheduleBufferedUpdate(UpdateRequestReason reason)
     qint64 wait_us = next_buffered_update_us - now_us;
     logBufferedPacingStats(now_us, interval_us, wait_us, timer_owned_playback, pace_thread_active);
     buffered_pace_thread->arm(next_buffered_update_us);
+}
+
+bool QmlMainWindow::detectRepeatedPicture()
+{
+    constexpr int w = RepeatDetector::kWidth;
+    constexpr int h = RepeatDetector::kHeight;
+    RepeatStats &st = fg_repeat_stats;
+    const int64_t begin_us = static_cast<int64_t>(chiaki_time_now_monotonic_us());
+    if (!st.since_us)
+        st.since_us = begin_us;
+    fg_thumbnail.resize(static_cast<size_t>(w) * h * 4);
+    const bool have_thumbnail = frame_gen->thumbnail(&direct_frame, w, h, fg_thumbnail.data());
+    const int64_t end_us = static_cast<int64_t>(chiaki_time_now_monotonic_us());
+    bool repeat = false;
+    if (have_thumbnail) {
+        const RepeatDetector::Result r = fg_repeat_detector.classify(
+            fg_thumbnail.data(), static_cast<size_t>(w) * 4, direct_frame_packet_size, direct_frame_seq);
+        repeat = r.kind == RepeatDetector::Kind::Repeat;
+        const int64_t thumb_us = end_us - begin_us;
+        st.thumb_us_total += thumb_us;
+        st.thumb_us_max = qMax(st.thumb_us_max, thumb_us);
+        if (repeat) {
+            st.repeats++;
+            st.repeat_changed_max = qMax(st.repeat_changed_max, r.changed);
+        } else {
+            st.news++;
+            st.new_changed_min = qMin(st.new_changed_min, r.changed);
+        }
+        if (r.by_size)
+            st.by_size++;
+    } else {
+        fg_repeat_detector.unknown(direct_frame_seq);
+        st.unknown++;
+    }
+
+    const int cadence2 = fg_repeat_detector.cadence2();
+    if (fg_source_cadence2.fetchAndStoreRelaxed(cadence2) != cadence2) {
+        qCInfo(chiakiGui).nospace() << "Source cadence: a new picture every " << cadence2 / 2.0
+                                    << " stream frames"
+                                    << (cadence2 > 2 ? " (repeated pictures dropped)" : "");
+    }
+    // Summary for tuning: how pictures were told apart and what it cost.
+    if (end_us - st.since_us >= 10000000) {
+        const int measured = st.news + st.repeats;
+        qCInfo(chiakiGui).nospace()
+            << "Repeat detection: " << st.news << " new, " << st.repeats << " repeated, "
+            << st.by_size << " decided by size, " << st.unknown << " not compared; changed share: new min "
+            << st.new_changed_min * 100.0 << "%, repeat max " << st.repeat_changed_max * 100.0
+            << "%; thumbnail " << (measured ? st.thumb_us_total / measured : 0) << " us avg, "
+            << st.thumb_us_max << " us max";
+        st = {};
+        st.since_us = end_us;
+    }
+    return repeat;
 }
 
 void QmlMainWindow::scheduleRenderIfBacklog(UpdateRequestReason reason)
@@ -7085,7 +7130,7 @@ void QmlMainWindow::render()
     // With frame generation every stream frame is presented as several frames.
     const double present_submit_interval_s = timer_owned_playback
         ? present_interval_s
-        : stream_interval_s * fg_active_cadence / qMax(1, fg_active_multiplier);
+        : stream_interval_s * fg_active_cadence2 / (2.0 * qMax(1, fg_active_multiplier));
     const qint64 present_interval_us = static_cast<qint64>(qMax(1.0, vsync_duration * 1000000.0) + 0.5);
     const bool pending_overflow_waiting = hasPendingFrameOverflow();
     const bool pending_frame_waiting = snapshotQueueDepth() >= effectiveQueueDepthLimit() || hasPendingFrame();
@@ -7115,6 +7160,8 @@ void QmlMainWindow::render()
     struct pl_frame fg_override_frame = {};
     bool fg_override = false;
     bool direct_frame_fresh = false;
+    // A repeated picture arrived while the interface needs a redraw.
+    bool repeat_needs_redraw = false;
     fg_present_target_us = 0;
     fg_presenting_valid = false;
     if (bypass_frame_queue && !fg_pending_frames.empty()) {
@@ -7166,8 +7213,11 @@ void QmlMainWindow::render()
             QMutexLocker locker(&direct_frame_mutex);
             std::swap(incoming, direct_pending_frame);
             direct_pending_available.storeRelease(0);
-            if (incoming)
+            if (incoming) {
                 direct_frame_arrival_us = direct_pending_arrival_us;
+                direct_frame_seq = direct_pending_seq;
+                direct_frame_packet_size = direct_pending_packet_size;
+            }
             reset_direct_frame = direct_frame_reset.fetchAndStoreRelaxed(0) != 0;
         }
         if (reset_direct_frame && frame_gen)
@@ -7175,6 +7225,7 @@ void QmlMainWindow::render()
         if (reset_direct_frame) {
             fg_pending_frames.clear();
             fg_pacer.reset();
+            fg_repeat_detector.reset();
         }
         if (reset_direct_frame) {
             pl_unmap_avframe(placeboGpu(), &direct_frame);
@@ -7195,12 +7246,38 @@ void QmlMainWindow::render()
             } else {
                 direct_frame_serial++;
                 direct_frame_fresh = true;
+                // With frame generation on, a repeat of the last picture is
+                // not shown again: frame generation only works on new
+                // pictures, and the queued frames keep their slots.
+                if (fg_last_backend > 0 && frame_gen && stream_active && detectRepeatedPicture()) {
+                    direct_frame_fresh = false;
+                    if (ui_priority_update_pending.loadAcquire() == 0 && quick_need_render.loadAcquire() == 0) {
+                        // Nothing to draw: back to waiting for the next slot
+                        // or picture at once.
+                        av_frame_free(&incoming);
+                        finalize_render();
+                        if (!fg_pending_frames.empty())
+                            scheduleUpdate(false, UpdateRequestReason::PendingFrame);
+                        return;
+                    }
+                    // The interface needs a redraw: show the next queued frame
+                    // (or the picture again if none is left).
+                    repeat_needs_redraw = true;
+                }
             }
             av_frame_free(&incoming);
         }
         direct_render_frame = direct_frame;
+        if (repeat_needs_redraw && !fg_pending_frames.empty()) {
+            fg_presenting = fg_pending_frames.front();
+            fg_presenting_valid = true;
+            direct_render_frame = fg_presenting.frame;
+            fg_present_target_us = fg_presenting.target_us;
+            fg_pending_frames.erase(fg_pending_frames.begin());
+            fg_override = true;
+        }
         frame_mix = {};
-        frame_mix.num_frames = direct_frame.num_planes > 0 ? 1 : 0;
+        frame_mix.num_frames = direct_render_frame.num_planes > 0 ? 1 : 0;
         frame_mix.frames = direct_frames;
         frame_mix.timestamps = direct_timestamps;
         queue_status = PL_QUEUE_OK;
@@ -8077,6 +8154,9 @@ void QmlMainWindow::render()
         fg_skip_logged = 0;
         // New stream: start the presentation clock afresh.
         fg_pacer.reset();
+        fg_repeat_detector.reset();
+        fg_repeat_stats = {};
+        fg_source_cadence2.storeRelaxed(2);
         if (!fg_override)
             fg_pending_frames.clear();
     }
@@ -8095,7 +8175,7 @@ void QmlMainWindow::render()
         fg_pending_frames.clear();
         fg_pacer.reset();
         fg_active_multiplier = 1;
-        fg_active_cadence = 1;
+        fg_active_cadence2 = 2;
         if (frame_gen)
             frame_gen->reset();
         if (fg_backend && !bypass_frame_queue)
@@ -8104,15 +8184,16 @@ void QmlMainWindow::render()
     bool fg_applied = fg_override;
     if (!fg_override && direct_frame_fresh && fg_backend > 0 && stream_active && direct_render_frame.num_planes > 0) {
         const auto backend_choice = static_cast<FrameGen::Backend>(fg_backend);
-        // With repeats dropped a picture lasts `cadence` stream frames; the
-        // multiplier stays relative to the stream rate, so output fps is kept.
-        const int cadence = fg_source_cadence.loadRelaxed();
-        const double source_interval_s = stream_interval_s * cadence;
+        // With repeats dropped a picture lasts `cadence2 / 2` stream frames on
+        // average (1.5 for a 40 fps game in a 60 fps stream); the multiplier
+        // stays relative to the stream rate, so output fps is kept.
+        const int cadence2 = fg_repeat_detector.cadence2();
+        const double source_interval_s = stream_interval_s * cadence2 / 2.0;
         // More output frames than the display can show only adds latency.
         const int refresh_cap = source_interval_s > 0.0
             ? static_cast<int>(std::floor(refresh_rate * source_interval_s + 0.15))
             : 2;
-        int multiplier = qMin(settings->GetFrameGenMultiplier() * cadence, refresh_cap);
+        int multiplier = qMin(static_cast<int>(settings->GetFrameGenMultiplier() * cadence2 / 2.0 + 0.5), refresh_cap);
         fg_refresh_limited = multiplier < 2;
         if (fg_refresh_limited && fg_skip_logged != 3) {
             fg_skip_logged = 3;
@@ -8173,21 +8254,28 @@ void QmlMainWindow::render()
                     const int64_t arrival_us = direct_frame_arrival_us > 0 && direct_frame_arrival_us <= now_us &&
                             now_us - direct_frame_arrival_us < period_us
                         ? direct_frame_arrival_us : now_us;
-                    fg_pacer.schedule(arrival_us, period_us, count, gpu_lead_us, fg_targets.data());
+                    // Frames of a late picture closer than a refresh interval
+                    // would not show: the pacer marks the surplus with -1.
+                    fg_pacer.schedule(arrival_us, period_us, count, gpu_lead_us, fg_targets.data(),
+                                      static_cast<int64_t>(present_interval_us));
                     // After a resync the clock may restart before frames still
                     // queued: keep the presentation times increasing.
-                    if (!fg_pending_frames.empty()) {
+                    const auto first_shown = std::find_if(fg_targets.begin(), fg_targets.end(),
+                                                          [](int64_t t) { return t >= 0; });
+                    if (!fg_pending_frames.empty() && first_shown != fg_targets.end()) {
                         const int64_t earliest = fg_pending_frames.back().target_us + period_us / count;
-                        if (fg_targets[0] < earliest) {
-                            const int64_t shift = earliest - fg_targets[0];
+                        if (*first_shown < earliest) {
+                            const int64_t shift = earliest - *first_shown;
                             for (int64_t &t : fg_targets)
-                                t += shift;
+                                if (t >= 0)
+                                    t += shift;
                         }
                     }
                 }
-                // Unknown stream rate: untimed, presented as rendered.
+                // Unknown stream rate (target 0): untimed, presented as rendered.
                 for (size_t i = 0; i < fg_outputs.size(); i++)
-                    fg_pending_frames.push_back({ fg_outputs[i], fg_targets[i], fg_batch });
+                    if (fg_targets[i] >= 0)
+                        fg_pending_frames.push_back({ fg_outputs[i], fg_targets[i], fg_batch });
                 fg_status_gpu_us.storeRelaxed(static_cast<int>(gpu_ms * 1000.0f));
                 fg_status_buffer_us.storeRelaxed(static_cast<int>(fg_pacer.bufferUs()));
                 // This render shows the oldest frame still due (the rest of
@@ -8197,12 +8285,12 @@ void QmlMainWindow::render()
                 direct_render_frame = fg_presenting.frame;
                 fg_present_target_us = fg_presenting.target_us;
                 fg_pending_frames.erase(fg_pending_frames.begin());
-                if (fg_active_multiplier != multiplier || fg_active_cadence != cadence)
+                if (fg_active_multiplier != multiplier || fg_active_cadence2 != cadence2)
                     qCInfo(chiakiGui).nospace() << "Frame generation active: " << FrameGen::backendName(backend_choice)
-                                      << " " << multiplier << "x"
-                                      << (cadence == 2 ? " of a half-rate source (repeats dropped)" : "");
+                                      << " " << multiplier << "x of a "
+                                      << (source_interval_s > 0.0 ? 1.0 / source_interval_s : 0.0) << " fps source";
                 fg_active_multiplier = multiplier;
-                fg_active_cadence = cadence;
+                fg_active_cadence2 = cadence2;
                 fg_applied = true;
             }
         }
@@ -8211,7 +8299,7 @@ void QmlMainWindow::render()
         if (fg_active_multiplier != 1) {
             qCInfo(chiakiGui) << "Frame generation inactive";
             fg_active_multiplier = 1;
-            fg_active_cadence = 1;
+            fg_active_cadence2 = 2;
         }
         // The new picture is shown now: older queued frames would come after it.
         fg_pending_frames.clear();

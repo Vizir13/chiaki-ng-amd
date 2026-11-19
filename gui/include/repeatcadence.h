@@ -3,159 +3,172 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <vector>
 
-// Recognises a stream that sends every picture twice, e.g. a 30 fps game in a
-// 60 fps Remote Play stream. The console encodes the repeat as a much smaller
-// P-frame (measured on a PS5 with GTA: 9-14 KB against 45-70 KB for a new
-// picture; in a still scene ~80 B against ~1.3 KB), so it shows up as a small
-// packet between normal ones. Frame generation fed with those repeats
-// interpolates between identical pictures and then jumps, which looks wobbly;
-// dropping them restores an even 30 fps source.
+// Tells new game pictures from repeats in the stream, and how many stream
+// frames a game picture lasts.
 //
-// "Small" is judged against the typical size of a new picture: the median of
-// the larger half of the last 16 frames. A single huge key frame (sent after
-// packet loss) therefore does not make every following frame look small, and
-// a run of quiet pictures (static scenes) lowers the reference with them.
+// A 30 fps game in a 60 fps Remote Play stream sends every picture twice; a
+// 40 fps game alternates one and two frames, and a late picture is shown for
+// three frames and the next one for a single frame. Frame generation must
+// interpolate between real pictures only: a repeat taken for a new picture
+// makes it interpolate between identical pictures and then jump, and a new
+// picture taken for a repeat makes it interpolate across two pictures (twice
+// the motion, which shows as artifacts while the camera turns).
 //
-// A 30 fps game does not alternate perfectly: a late picture is shown for
-// three stream frames and the next one for a single frame (new, repeat,
-// repeat, new, new, repeat...). Once locked the detector therefore does not
-// follow a fixed new/repeat slot pattern: every small frame is a repeat and
-// is dropped, every normal frame is kept. Only clear evidence that the game
-// now renders at the stream rate (several pairs of consecutive substantial new
-// pictures) unlocks it; every unlock changes the presentation clock, so
-// flapping costs a visible hitch each time.
-class RepeatCadenceDetector
+// The decision is made on the picture itself: a small thumbnail (rendered on
+// the GPU) is compared with the thumbnail of the last new picture. A repeat
+// only differs by encoder refinement, which the downscale averages away; a
+// new picture in motion changes a large part of the thumbnail. The two can
+// only be confused when nearly nothing moves, where interpolating across two
+// pictures does not show. The compressed size of the frame (a repeat is a
+// much smaller P-frame) only decides the few in-between cases.
+//
+// The cadence is the average distance between new pictures over the last
+// pictures, in half stream frames: a lone pacing hiccup (3 then 1) does not
+// move it, a real change of the game's frame rate does within ~0.2 s.
+//
+// Pure logic without Qt or Vulkan so it can be unit tested.
+class RepeatDetector
 {
 public:
-    // Feeds the compressed size of the next frame (0 = unknown, ignored).
-    // Returns true if that frame repeats the previous picture and can be
-    // dropped.
-    bool feed(size_t packet_size)
+    static constexpr int kWidth = 256;
+    static constexpr int kHeight = 144;
+
+    enum class Kind {
+        New,
+        Repeat,
+    };
+
+    struct Result
     {
-        if (!packet_size)
-            return false;
-        last_size = packet_size;
-        const size_t reference = typicalNewSize();
-        const bool small = reference > 0 && static_cast<double>(packet_size) < static_cast<double>(reference) * kSmallRatio;
-        sizes[cursor] = packet_size;
-        cursor = (cursor + 1) % sizes.size();
-        if (filled < sizes.size())
-            filled++;
-        if (!small)
-            last_new = packet_size;
+        Kind kind = Kind::New;
+        // Share of the thumbnail that changed since the last new picture.
+        double changed = 1.0;
+        // Decided by the compressed size (the picture alone was not clear).
+        bool by_size = false;
+    };
 
-        history = (history << 1) | (small ? 1u : 0u);
-        if (seen < 32)
-            seen++;
-
-        if (!locked) {
-            // 12 frames (200 ms at 60 fps) strictly alternating.
-            const uint32_t last12 = history & 0xfffu;
-            if (seen >= 12 && (last12 == 0xaaau || last12 == 0x555u)) {
-                locked = true;
-                consecutive_drops = 0;
-                substantial = 0;
-                long_new = static_cast<double>(last_new);
-                if (small) {
-                    consecutive_drops = 1;
-                    return true;
-                }
+    // Classifies a frame from its RGBA8 thumbnail (kWidth x kHeight, rows of
+    // `row_pitch` bytes), its compressed size (0 = unknown) and its position
+    // in the stream (counting every stream frame, lost ones included).
+    Result classify(const uint8_t *rgba, size_t row_pitch, size_t packet_size, uint64_t seq)
+    {
+        Result r;
+        luma.resize(static_cast<size_t>(kWidth) * kHeight);
+        for (int y = 0; y < kHeight; y++) {
+            const uint8_t *row = rgba + static_cast<size_t>(y) * row_pitch;
+            uint8_t *out = luma.data() + static_cast<size_t>(y) * kWidth;
+            for (int x = 0; x < kWidth; x++) {
+                const uint8_t *p = row + x * 4;
+                out[x] = static_cast<uint8_t>((54u * p[0] + 183u * p[1] + 19u * p[2] + 128u) >> 8);
             }
-            return false;
         }
-
-        if (small) {
-            substantial = substantial << 1;
-            // The picture must move on: after two repeats in a row the next
-            // small frame is kept (a stalled game, or a barely changing
-            // picture judged small).
-            if (consecutive_drops >= 2) {
-                consecutive_drops = 0;
-                return false;
+        if (reference.size() == luma.size()) {
+            size_t changed = 0;
+            for (size_t i = 0; i < luma.size(); i++)
+                changed += std::abs(static_cast<int>(luma[i]) - static_cast<int>(reference[i])) > kPixelDelta ? 1u : 0u;
+            r.changed = static_cast<double>(changed) / static_cast<double>(luma.size());
+            if (r.changed <= kRepeatShare) {
+                r.kind = Kind::Repeat;
+            } else if (r.changed < kNewShare) {
+                r.by_size = true;
+                const bool small = packet_size > 0 && new_size > 0.0 &&
+                    static_cast<double>(packet_size) < new_size * kSmallSizeRatio;
+                r.kind = small ? Kind::Repeat : Kind::New;
             }
-            consecutive_drops++;
-            return true;
         }
-        consecutive_drops = 0;
-
-        // Long-term size of a new picture in motion, to tell a real new picture
-        // from the near-identical frames of a still scene. Still pictures only
-        // let it sink slowly (half in ~10 s), so the repeats right after a
-        // still scene are not taken for new pictures.
-        const bool is_substantial = static_cast<double>(packet_size) >= long_new * kSubstantialRatio;
-        if (is_substantial)
-            long_new += (static_cast<double>(packet_size) - long_new) / 64.0;
-        else
-            long_new *= 0.998;
-        substantial = (substantial << 1) | (is_substantial ? 1u : 0u);
-        // Pairs of consecutive substantial new pictures in the last 16 frames.
-        const uint32_t pairs = substantial & (substantial >> 1) & 0x7fffu;
-        if (popcount(pairs) >= kUnlockPairs)
-            unlock();
-        return false;
+        if (r.kind == Kind::New) {
+            reference.swap(luma);
+            if (packet_size > 0)
+                new_size = new_size > 0.0 ? new_size + (static_cast<double>(packet_size) - new_size) / 8.0
+                                          : static_cast<double>(packet_size);
+            newPicture(seq);
+        }
+        return r;
     }
 
-    // Stream frames per picture: 2 while every picture is repeated, else 1.
-    int cadence() const { return locked ? 2 : 1; }
-    size_t lastSize() const { return last_size; }
-    // Size of the last frame judged a new picture.
-    size_t newPictureSize() const { return last_new; }
+    // A frame that could not be compared (no thumbnail): taken as a new
+    // picture, and the next one is compared with nothing.
+    void unknown(uint64_t seq)
+    {
+        reference.clear();
+        newPicture(seq);
+    }
 
-    void reset() { *this = RepeatCadenceDetector(); }
+    // Stream frames per game picture, in halves: 2 = every frame is a new
+    // picture, 3 = 40 fps in a 60 fps stream, 4 = 30 fps, 6 = 20 fps.
+    int cadence2() const { return cadence_half; }
+
+    void reset()
+    {
+        reference.clear();
+        new_size = 0.0;
+        have_seq = false;
+        last_seq = 0;
+        gaps_count = 0;
+        gaps_cursor = 0;
+        cadence_half = 2;
+    }
 
 private:
-    // Median of the larger half of the recent frame sizes.
-    size_t typicalNewSize() const
+    void newPicture(uint64_t seq)
     {
-        if (filled < 4)
-            return last_new;
-        std::array<size_t, 16> tmp = {};
-        std::copy(sizes.begin(), sizes.begin() + static_cast<std::ptrdiff_t>(filled), tmp.begin());
-        std::sort(tmp.begin(), tmp.begin() + static_cast<std::ptrdiff_t>(filled));
-        const size_t half = filled / 2;
-        return tmp[half + (filled - half) / 2];
+        if (have_seq && seq > last_seq) {
+            const uint64_t gap = seq - last_seq;
+            // Longer gaps are stills or stalls, not the game's frame rate.
+            if (gap <= kMaxGap) {
+                gaps[gaps_cursor] = static_cast<uint8_t>(gap);
+                gaps_cursor = (gaps_cursor + 1) % gaps.size();
+                if (gaps_count < gaps.size())
+                    gaps_count++;
+                updateCadence();
+            }
+        }
+        have_seq = true;
+        last_seq = seq;
     }
 
-    static int popcount(uint32_t v)
+    void updateCadence()
     {
-        int n = 0;
-        for (; v; v &= v - 1)
-            n++;
-        return n;
+        if (gaps_count < kMinGaps)
+            return;
+        int sum = 0;
+        for (size_t i = 0; i < gaps_count; i++)
+            sum += gaps[i];
+        const double target = 2.0 * sum / static_cast<double>(gaps_count);
+        // Hysteresis: the mean has to move by more than 0.3 stream frames.
+        if (std::fabs(target - cadence_half) > 0.6)
+            cadence_half = std::clamp(static_cast<int>(std::lround(target)), 2, 2 * static_cast<int>(kMaxCadence));
     }
 
-    void unlock()
-    {
-        locked = false;
-        history = 0;
-        seen = 0;
-        consecutive_drops = 0;
-        substantial = 0;
-    }
+    // A thumbnail pixel (an average of ~7x7 stream pixels) counts as changed
+    // beyond this many 8-bit luma levels.
+    static constexpr int kPixelDelta = 8;
+    // At most this share changed: the same picture. At least kNewShare: a new
+    // one. In between the compressed size decides.
+    static constexpr double kRepeatShare = 0.001;
+    static constexpr double kNewShare = 0.01;
+    // A repeat is a much smaller P-frame than a new picture (PS5, GTA: 9-14 KB
+    // against 45-70 KB, still scenes ~1.3 KB against ~3.4 KB).
+    static constexpr double kSmallSizeRatio = 0.5;
+    static constexpr uint64_t kMaxGap = 6;
+    static constexpr uint64_t kMaxCadence = 3;
+    static constexpr size_t kMinGaps = 6;
 
-    // Repeats measured up to ~0.3 of a new picture; new pictures rarely fall
-    // below ~0.6 of the typical size.
-    static constexpr double kSmallRatio = 0.42;
-    // A new picture smaller than this share of the long-term size belongs to
-    // a still scene and proves nothing about the frame rate.
-    static constexpr double kSubstantialRatio = 0.5;
-    // A game at the stream rate gives ~15 pairs in 16 frames; a 30 fps game
-    // with pacing hiccups gives one now and then.
-    static constexpr int kUnlockPairs = 4;
-    std::array<size_t, 16> sizes = {};
-    size_t cursor = 0;
-    size_t filled = 0;
-    size_t last_new = 0;
-    size_t last_size = 0;
-    uint32_t history = 0;
-    uint32_t substantial = 0;
-    double long_new = 0.0;
-    int seen = 0;
-    int consecutive_drops = 0;
-    bool locked = false;
+    std::vector<uint8_t> luma;
+    std::vector<uint8_t> reference;
+    double new_size = 0.0;
+    bool have_seq = false;
+    uint64_t last_seq = 0;
+    std::array<uint8_t, 12> gaps = {};
+    size_t gaps_count = 0;
+    size_t gaps_cursor = 0;
+    int cadence_half = 2;
 };
 
 #endif // CHIAKI_GUI_REPEATCADENCE_H

@@ -166,6 +166,11 @@ struct FrameGen::Impl
     int vfg_parity = 0;
     // The first calls after a backend starts are logged step by step.
     int trace_frames = 0;
+    // Thumbnails for repeat detection: own renderer (its caches stay apart
+    // from the frame generation input) and a host readable target.
+    pl_renderer thumb_renderer = nullptr;
+    pl_tex thumb_tex = nullptr;
+    bool thumb_failed = false;
 
     PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr = nullptr;
     PFN_vkGetDeviceQueue vkGetDeviceQueue = nullptr;
@@ -583,6 +588,9 @@ void FrameGen::Impl::shutdownCommon()
         pl_vulkan_sem_destroy(gpu, &sem_done);
     timer.destroy();
     pl_renderer_destroy(&renderer);
+    pl_renderer_destroy(&thumb_renderer);
+    pl_tex_destroy(gpu, &thumb_tex);
+    thumb_failed = false;
     done_value = 0;
     common_ready = false;
     vk = nullptr;
@@ -1259,6 +1267,63 @@ void FrameGen::reset()
     impl->reset_pending = true;
 }
 
+bool FrameGen::thumbnail(const struct pl_frame *src, int w, int h, uint8_t *rgba)
+{
+    Impl &d = *impl;
+    if (!d.common_ready || d.thumb_failed || !src || !rgba || w <= 0 || h <= 0)
+        return false;
+    if (!d.thumb_renderer)
+        d.thumb_renderer = pl_renderer_create(d.log, d.gpu);
+    if (d.thumb_tex && (d.thumb_tex->params.w != w || d.thumb_tex->params.h != h))
+        pl_tex_destroy(d.gpu, &d.thumb_tex);
+    if (!d.thumb_tex) {
+        pl_fmt fmt = pl_find_fmt(d.gpu, PL_FMT_UNORM, 4, 8, 8,
+                                 static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+        if (fmt) {
+            struct pl_tex_params params = {};
+            params.w = w;
+            params.h = h;
+            params.format = fmt;
+            params.renderable = true;
+            params.host_readable = true;
+            d.thumb_tex = pl_tex_create(d.gpu, &params);
+        }
+    }
+    if (!d.thumb_renderer || !d.thumb_tex) {
+        qCWarning(chiakiGui) << "[framegen] Thumbnails unavailable, repeated pictures are not detected";
+        d.thumb_failed = true;
+        return false;
+    }
+
+    struct pl_frame target = {};
+    target.num_planes = 1;
+    target.planes[0].texture = d.thumb_tex;
+    target.planes[0].components = 4;
+    for (int i = 0; i < 4; i++)
+        target.planes[0].component_mapping[i] = i;
+    target.repr = pl_color_repr_rgb;
+    target.color = pl_color_space_bt709;
+    // Plain area average: no dithering, debanding or other processing that
+    // would differ between two renders of the same picture.
+    struct pl_render_params params = pl_render_default_params;
+    params.frame_mixer = nullptr;
+    params.upscaler = &pl_filter_bilinear;
+    params.downscaler = &pl_filter_box;
+    params.plane_upscaler = &pl_filter_bilinear;
+    params.deband_params = nullptr;
+    params.sigmoid_params = nullptr;
+    params.dither_params = nullptr;
+    params.peak_detect_params = nullptr;
+    if (!pl_render_image(d.thumb_renderer, src, &target, &params))
+        return false;
+    struct pl_tex_transfer_params transfer = {};
+    transfer.tex = d.thumb_tex;
+    transfer.ptr = rgba;
+    transfer.row_pitch = static_cast<size_t>(w) * 4;
+    // Without a callback the download completes before returning.
+    return pl_tex_download(d.gpu, &transfer);
+}
+
 void FrameGen::setFlowHighQuality(bool high)
 {
     impl->flow_high_quality = high;
@@ -1789,5 +1854,6 @@ void FrameGen::setVfgMode(int) {}
 void FrameGen::setCleanup(int) {}
 void FrameGen::destroy() {}
 bool FrameGen::process(const struct pl_frame *, int, int, int, float, std::vector<struct pl_frame> &) { return false; }
+bool FrameGen::thumbnail(const struct pl_frame *, int, int, uint8_t *) { return false; }
 
 #endif // CHIAKI_HAVE_FRAMEGEN
